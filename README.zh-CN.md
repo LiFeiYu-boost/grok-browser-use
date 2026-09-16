@@ -23,6 +23,7 @@ Chrome 136+ 默认用户目录不再接受 `--remote-debugging-port`。[browser-
 - **常驻指针** — 分组里常驻彗星指针，和系统箭头一眼能分开；不是点一下才闪一下
 - **后台 CDP** — 在这些标签上挂 `Runtime` + `Network`：console（含堆栈）、请求列表、单条 header + 截断 body、TTFB/FCP、计算样式。不打开 DevTools 面板
 - **wait_for** — 等网络空闲、console 匹配或选择器出现，再截图
+- **安全点击** — snapshot 把退出登录 / 删除标成 `destructive`；点击走 CDP 鼠标事件，不是假的 `el.click()`
 - **不需要 9222** — 不必打开 `chrome://inspect/#remote-debugging`
 
 ## 架构
@@ -69,9 +70,12 @@ ln -s "$(pwd)" ~/.grok/plugins/grok-browser-use
 | 动作 | 工具 |
 |------|------|
 | 开页、点、填、截图 | `new_tab` `snapshot` `click` `fill` `screenshot` `run_parallel` |
-| 等稳 | `wait_for`（`networkIdle` / `consolePattern` / `selector`） |
+| 悬停、滚动、下拉 | `hover` `scroll` `select_option` |
+| 等稳 | `wait_for`（`networkIdle` / `consolePattern` / `selector`）；`click` / `screenshot` 默认会等 |
 | 请求与日志 | `network` `get_network_request` `console` `get_console_message` |
 | 性能与样式 | `performance` `css_styles` |
+
+退出登录 / 删除一类控件在 `snapshot` 里会标 `destructive`。`click` 默认拒绝，除非传入 `confirmDestructive: true`。扩展睡着时 MCP 进程不会退出（看 `status.connectionState`）。
 
 只采集 **Grok Browser** 分组里的标签，不会去翻你正在用的其它页。
 

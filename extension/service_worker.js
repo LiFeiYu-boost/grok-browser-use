@@ -1,5 +1,6 @@
 import {
   attachCdp,
+  detachCdp,
   listConsole as cdpListConsole,
   getConsole as cdpGetConsole,
   listNetwork as cdpListNetwork,
@@ -8,6 +9,8 @@ import {
   waitConsole,
   performanceSummary,
   cssForUid,
+  cdpClick,
+  cdpHover,
 } from "./cdp-collector.js";
 
 const HOST_NAME = "com.xai.grok.browser";
@@ -15,6 +18,7 @@ const GROUP_TITLE = "Grok Browser";
 const GROUP_COLOR = "cyan";
 const FORBIDDEN = [];
 const grokTabIds = new Set();
+const lastSnap = new Map();
 const consoleBuf = [];
 const networkBuf = [];
 const BUF_MAX = 400;
@@ -116,15 +120,21 @@ async function dispatch(method, params) {
     case "tabs.snapshot":
       return await snapshot(params.tabId);
     case "tabs.click":
-      return await click(params.tabId, params.uid);
+      return await click(params.tabId, params.uid, params);
     case "tabs.fill":
-      return await fill(params.tabId, params.uid, params.value);
+      return await fill(params.tabId, params.uid, params.value, params);
     case "tabs.press":
       return await press(params.tabId, params.key);
+    case "tabs.hover":
+      return await hover(params.tabId, params.uid);
+    case "tabs.scroll":
+      return await scroll(params.tabId, params);
+    case "tabs.selectOption":
+      return await selectOption(params.tabId, params.uid, params.value || params.label);
     case "tabs.evaluate":
       return await evaluate(params.tabId, params.function);
     case "tabs.screenshot":
-      return await screenshot(params.tabId);
+      return await screenshot(params.tabId, params);
     case "tabs.hasPointer":
       return await hasPointer(params.tabId);
     case "diagnostics.console":
@@ -225,11 +235,18 @@ async function createTab(params) {
   await attachCdp(tab.id).catch(() => {});
   await chrome.tabs.update(tab.id, { url: params.url });
   await waitComplete(tab.id);
+  if (params.wait !== false) {
+    await waitNetworkIdle(tab.id, {
+      idleMs: Number(params.idleMs) || 300,
+      timeoutMs: Number(params.timeoutMs) || 2500,
+    }).catch(() => {});
+  }
   await ensurePointer(tab.id);
+  const loaded = await chrome.tabs.get(tab.id).catch(() => tab);
   return {
     tabId: tab.id,
-    url: tab.url || params.url,
-    title: tab.title || "",
+    url: loaded.url || params.url,
+    title: loaded.title || "",
     groupId,
     tabGroup: GROUP_TITLE,
   };
@@ -256,53 +273,272 @@ function waitComplete(tabId, timeoutMs = 15000) {
   });
 }
 
+function snapshotInFrame() {
+  const DESTRUCTIVE =
+    /(log\s*out|sign\s*out|signout|退出登录|注销|delete account|删除账号|删除账户|断开连接|解除连接|解除绑定|\bdisconnect\b)/i;
+  const sel =
+    'a, button, input, textarea, select, option, summary, [role], [onclick], [tabindex]:not([tabindex="-1"]), [contenteditable="true"]';
+  const implicitRole = (el) => {
+    const role = el.getAttribute("role");
+    if (role) return role;
+    const tag = el.tagName.toLowerCase();
+    if (tag === "a") return "link";
+    if (tag === "button") return "button";
+    if (tag === "select") return "combobox";
+    if (tag === "option") return "option";
+    if (tag === "textarea") return "textbox";
+    if (tag === "input") {
+      const t = (el.type || "text").toLowerCase();
+      if (t === "checkbox") return "checkbox";
+      if (t === "radio") return "radio";
+      if (t === "submit" || t === "button" || t === "reset") return "button";
+      return "textbox";
+    }
+    if (el.isContentEditable) return "textbox";
+    return tag;
+  };
+  const accessibleName = (el) => {
+    const labelled = el.getAttribute("aria-labelledby");
+    if (labelled) {
+      const t = labelled
+        .split(/\s+/)
+        .map((id) => {
+          const n = document.getElementById(id);
+          return n ? (n.innerText || "").trim() : "";
+        })
+        .filter(Boolean)
+        .join(" ");
+      if (t) return t.slice(0, 80);
+    }
+    return (
+      el.getAttribute("aria-label") ||
+      (el.labels && el.labels[0] && el.labels[0].innerText) ||
+      el.getAttribute("placeholder") ||
+      el.getAttribute("alt") ||
+      el.getAttribute("title") ||
+      (el.innerText || "").trim().slice(0, 80) ||
+      el.getAttribute("name") ||
+      ""
+    );
+  };
+  const nodes = [];
+  const seen = new Set();
+  for (const el of document.querySelectorAll(sel)) {
+    if (seen.has(el)) continue;
+    seen.add(el);
+    if (el.closest("script, style, noscript")) continue;
+    const r = el.getBoundingClientRect();
+    const tag = el.tagName.toLowerCase();
+    const isOption = tag === "option";
+    const st = getComputedStyle(el);
+    if (!isOption && (r.width <= 0 || r.height <= 0)) continue;
+    if (st.visibility === "hidden" || st.display === "none") continue;
+    if (el.getAttribute("aria-hidden") === "true") continue;
+    const name = String(accessibleName(el) || "").trim();
+    const href = el.href || el.getAttribute("href") || "";
+    const destructive =
+      DESTRUCTIVE.test(`${name} ${href}`) || /^(删除|delete)$/i.test(name);
+    const uid = "e" + (nodes.length + 1);
+    el.setAttribute("data-gbc-uid", uid);
+    if (destructive) el.setAttribute("data-gbc-destructive", "1");
+    else el.removeAttribute("data-gbc-destructive");
+    let x = r.left + r.width / 2;
+    let y = r.top + r.height / 2;
+    try {
+      let win = window;
+      while (win !== win.top) {
+        const frame = win.frameElement;
+        if (!frame) break;
+        const fr = frame.getBoundingClientRect();
+        x += fr.left;
+        y += fr.top;
+        win = win.parent;
+      }
+    } catch {
+      // cross-origin parent
+    }
+    nodes.push({
+      uid,
+      tag,
+      role: implicitRole(el),
+      name,
+      label: name,
+      type: el.type || undefined,
+      id: el.id || undefined,
+      disabled: Boolean(el.disabled) || el.getAttribute("aria-disabled") === "true",
+      destructive,
+      inViewport:
+        r.bottom > 0 &&
+        r.right > 0 &&
+        r.top < (window.innerHeight || 0) &&
+        r.left < (window.innerWidth || 0),
+      value: "value" in el ? String(el.value || "").slice(0, 80) : undefined,
+      href: href ? String(href).slice(0, 200) : undefined,
+      x: Math.round(x),
+      y: Math.round(y),
+      w: Math.round(r.width),
+      h: Math.round(r.height),
+    });
+  }
+  let crossOrigin = false;
+  try {
+    void window.top.document;
+  } catch {
+    crossOrigin = true;
+  }
+  return {
+    href: location.href,
+    title: document.title,
+    excerpt: (document.body && document.body.innerText
+      ? document.body.innerText
+      : ""
+    ).slice(0, 800),
+    crossOrigin,
+    nodes,
+  };
+}
+
 async function snapshot(tabId) {
-  const [{ result }] = await chrome.scripting.executeScript({
-    target: { tabId },
-    func: () => {
-      const sel =
-        'a, button, input, textarea, select, [role="button"], [role="link"], [role="textbox"], [contenteditable="true"]';
-      const nodes = [...document.querySelectorAll(sel)].filter((el) => {
-        const r = el.getBoundingClientRect();
-        const st = getComputedStyle(el);
-        return (
-          r.width > 0 &&
-          r.height > 0 &&
-          st.visibility !== "hidden" &&
-          st.display !== "none"
-        );
-      });
+  const injections = await chrome.scripting.executeScript({
+    target: { tabId, allFrames: true },
+    func: snapshotInFrame,
+  });
+  const frames = [];
+  const nodes = [];
+  let title = "";
+  let url = "";
+  let excerpt = "";
+  for (const inj of injections || []) {
+    const res = inj.result;
+    if (!res) {
+      frames.push({ frameId: inj.frameId, crossOrigin: true });
+      continue;
+    }
+    const prefix = `f${inj.frameId}-`;
+    const pairs = (res.nodes || []).map((n) => [n.uid, prefix + n.uid]);
+    if (pairs.length) {
+      await chrome.scripting.executeScript({
+        target: { tabId, frameIds: [inj.frameId] },
+        func: (list) => {
+          for (const [from, to] of list) {
+            const el = document.querySelector(`[data-gbc-uid="${from}"]`);
+            if (el) el.setAttribute("data-gbc-uid", to);
+          }
+        },
+        args: [pairs],
+      }).catch(() => {});
+    }
+    if (!url && res.href) url = res.href;
+    if (!title && res.title) title = res.title;
+    if (!excerpt && res.excerpt) excerpt = res.excerpt;
+    frames.push({
+      frameId: inj.frameId,
+      href: res.href,
+      crossOrigin: Boolean(res.crossOrigin),
+      nodeCount: (res.nodes || []).length,
+    });
+    for (const n of res.nodes || []) {
+      nodes.push({ ...n, uid: prefix + n.uid, frameId: inj.frameId });
+    }
+  }
+  const out = {
+    title,
+    url,
+    excerpt,
+    bodyText: excerpt,
+    frames,
+    nodes,
+  };
+  lastSnap.set(tabId, out);
+  return out;
+}
+
+async function locateUid(tabId, uid) {
+  const cached = lastSnap.get(tabId);
+  const cachedNode = cached && cached.nodes && cached.nodes.find((n) => n.uid === uid);
+  const injections = await chrome.scripting.executeScript({
+    target: { tabId, allFrames: true },
+    func: (targetUid) => {
+      const el = document.querySelector(`[data-gbc-uid="${targetUid}"]`);
+      if (!el) return null;
+      el.scrollIntoView({ block: "center", inline: "nearest" });
+      const r = el.getBoundingClientRect();
+      let x = r.left + r.width / 2;
+      let y = r.top + r.height / 2;
+      try {
+        let win = window;
+        while (win !== win.top) {
+          const frame = win.frameElement;
+          if (!frame) break;
+          const fr = frame.getBoundingClientRect();
+          x += fr.left;
+          y += fr.top;
+          win = win.parent;
+        }
+      } catch {
+        // cross-origin parent
+      }
+      const name =
+        el.getAttribute("aria-label") ||
+        (el.innerText || "").trim().slice(0, 80) ||
+        el.getAttribute("name") ||
+        "";
       return {
-        title: document.title,
-        url: location.href,
-        bodyText: (document.body && document.body.innerText
-          ? document.body.innerText
-          : ""
-        ).slice(0, 4000),
-        nodes: nodes.map((el, i) => {
-          const uid = "e" + (i + 1);
-          el.setAttribute("data-gbc-uid", uid);
-          const label =
-            (el.labels && el.labels[0] && el.labels[0].innerText) ||
-            el.getAttribute("aria-label") ||
-            el.getAttribute("placeholder") ||
-            (el.innerText || "").trim().slice(0, 80) ||
-            el.getAttribute("name") ||
-            "";
-          return {
-            uid,
-            tag: el.tagName.toLowerCase(),
-            type: el.type || undefined,
-            name: el.getAttribute("name") || undefined,
-            id: el.id || undefined,
-            label,
-            value: "value" in el ? el.value : undefined,
-          };
-        }),
+        ok: true,
+        tag: el.tagName.toLowerCase(),
+        name,
+        destructive: el.getAttribute("data-gbc-destructive") === "1",
+        disabled: Boolean(el.disabled),
+        x,
+        y,
+        w: r.width,
+        h: r.height,
       };
     },
+    args: [uid],
   });
-  return result;
+  const hit = (injections || []).find((inj) => inj.result && inj.result.ok);
+  if (!hit) {
+    return { ok: false, error: "uid not found: " + uid };
+  }
+  return {
+    ...hit.result,
+    frameId: hit.frameId,
+    uid,
+    destructive: Boolean(
+      (hit.result && hit.result.destructive) ||
+        (cachedNode && cachedNode.destructive)
+    ),
+    name: (hit.result && hit.result.name) || (cachedNode && cachedNode.name) || "",
+  };
+}
+
+function refuseDestructive(loc, confirmDestructive) {
+  if (loc.destructive && !confirmDestructive) {
+    throw new Error(
+      `Refusing destructive click on ${loc.uid} (${loc.name || loc.tag}). Pass confirmDestructive: true if you really mean it.`
+    );
+  }
+}
+
+async function movePointerTo(tabId, x, y, pulse) {
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    func: (px, py, doPulse) => {
+      if (!window.__gbcPointer) return;
+      window.__gbcPointer.move(px, py);
+      if (doPulse) window.__gbcPointer.pulse();
+    },
+    args: [x, y, Boolean(pulse)],
+  }).catch(() => {});
+}
+
+async function maybeWait(tabId, params) {
+  if (params && params.wait === false) return;
+  await waitNetworkIdle(tabId, {
+    idleMs: Number(params && params.idleMs) || 300,
+    timeoutMs: Number(params && params.timeoutMs) || 2500,
+  }).catch(() => {});
 }
 
 async function refreshGrokTabs() {
@@ -389,48 +625,56 @@ async function hasPointer(tabId) {
   return result;
 }
 
-async function click(tabId, uid) {
+async function click(tabId, uid, params = {}) {
   await ensurePointer(tabId);
-  const [{ result }] = await chrome.scripting.executeScript({
-    target: { tabId },
-    func: async (targetUid) => {
-      const el = document.querySelector(`[data-gbc-uid="${targetUid}"]`);
-      if (!el) return { ok: false, error: "uid not found: " + targetUid };
-      if (window.__gbcPointer) {
-        const moved = await window.__gbcPointer.moveToUid(targetUid);
-        if (!moved.ok) return moved;
-        window.__gbcPointer.pulse();
-      }
-      el.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
-      el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
-      el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
-      el.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-      if (typeof el.click === "function") el.click();
-      return { ok: true, tag: el.tagName.toLowerCase() };
-    },
-    args: [uid],
-  });
-  if (!result || !result.ok) throw new Error(result && result.error ? result.error : "click failed");
-  return result;
+  const loc = await locateUid(tabId, uid);
+  if (!loc.ok) throw new Error(loc.error || "uid not found");
+  refuseDestructive(loc, params.confirmDestructive);
+  await movePointerTo(tabId, loc.x, loc.y, true);
+  let via = "cdp";
+  try {
+    await cdpClick(tabId, loc.x, loc.y);
+  } catch {
+    via = "dom";
+    const injections = await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      func: (targetUid) => {
+        const el = document.querySelector(`[data-gbc-uid="${targetUid}"]`);
+        if (!el) return null;
+        el.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
+        el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+        el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+        el.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        if (typeof el.click === "function") el.click();
+        return { ok: true, tag: el.tagName.toLowerCase() };
+      },
+      args: [uid],
+    });
+    const hit = (injections || []).find((inj) => inj.result && inj.result.ok);
+    if (!hit) throw new Error("click failed");
+  }
+  await maybeWait(tabId, params);
+  return { ok: true, uid, tag: loc.tag, name: loc.name, via };
 }
 
-async function fill(tabId, uid, value) {
+async function fill(tabId, uid, value, params = {}) {
   await ensurePointer(tabId);
-  const [{ result }] = await chrome.scripting.executeScript({
-    target: { tabId },
-    func: async (targetUid, nextValue) => {
+  const loc = await locateUid(tabId, uid);
+  if (!loc.ok) throw new Error(loc.error || "uid not found");
+  refuseDestructive(loc, params.confirmDestructive);
+  await movePointerTo(tabId, loc.x, loc.y, true);
+  const injections = await chrome.scripting.executeScript({
+    target: { tabId, allFrames: true },
+    func: (targetUid, nextValue) => {
       const el = document.querySelector(`[data-gbc-uid="${targetUid}"]`);
-      if (!el) return { ok: false, error: "uid not found: " + targetUid };
-      if (window.__gbcPointer) {
-        await window.__gbcPointer.moveToUid(targetUid);
-        window.__gbcPointer.pulse();
-      }
+      if (!el) return null;
       el.focus();
       const proto =
         el instanceof HTMLTextAreaElement
           ? HTMLTextAreaElement.prototype
           : HTMLInputElement.prototype;
-      const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
+      const setter = Object.getOwnPropertyDescriptor(proto, "value") &&
+        Object.getOwnPropertyDescriptor(proto, "value").set;
       if (setter) setter.call(el, nextValue);
       else el.value = nextValue;
       el.dispatchEvent(new Event("input", { bubbles: true }));
@@ -439,8 +683,87 @@ async function fill(tabId, uid, value) {
     },
     args: [uid, value],
   });
-  if (!result || !result.ok) throw new Error(result && result.error ? result.error : "fill failed");
-  return result;
+  const hit = (injections || []).find((inj) => inj.result && inj.result.ok);
+  if (!hit) throw new Error("fill failed");
+  await maybeWait(tabId, params);
+  return hit.result;
+}
+
+async function hover(tabId, uid) {
+  await ensurePointer(tabId);
+  const loc = await locateUid(tabId, uid);
+  if (!loc.ok) throw new Error(loc.error || "uid not found");
+  await movePointerTo(tabId, loc.x, loc.y, false);
+  try {
+    await cdpHover(tabId, loc.x, loc.y);
+  } catch {
+    await chrome.scripting.executeScript({
+      target: { tabId, frameIds: loc.frameId != null ? [loc.frameId] : undefined },
+      func: (targetUid) => {
+        const el = document.querySelector(`[data-gbc-uid="${targetUid}"]`);
+        if (!el) return;
+        el.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+        el.dispatchEvent(new MouseEvent("mouseenter", { bubbles: false }));
+      },
+      args: [uid],
+    });
+  }
+  return { ok: true, uid, x: loc.x, y: loc.y };
+}
+
+async function scroll(tabId, params = {}) {
+  if (params.uid) {
+    const loc = await locateUid(tabId, params.uid);
+    if (!loc.ok) throw new Error(loc.error || "uid not found");
+    return { ok: true, uid: params.uid, x: loc.x, y: loc.y };
+  }
+  const dy = Number(params.dy) || 0;
+  const dx = Number(params.dx) || 0;
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    func: (x, y) => window.scrollBy(x, y),
+    args: [dx, dy],
+  });
+  return { ok: true, dx, dy };
+}
+
+async function selectOption(tabId, uid, value) {
+  if (value == null || value === "") throw new Error("select_option needs value or label");
+  const loc = await locateUid(tabId, uid);
+  if (!loc.ok) throw new Error(loc.error || "uid not found");
+  await movePointerTo(tabId, loc.x, loc.y, true);
+  const injections = await chrome.scripting.executeScript({
+    target: { tabId, allFrames: true },
+    func: (targetUid, want) => {
+      let el = document.querySelector(`[data-gbc-uid="${targetUid}"]`);
+      if (!el) return null;
+      if (el.tagName.toLowerCase() === "option") {
+        el = el.closest("select") || el;
+      }
+      if (el.tagName.toLowerCase() !== "select") {
+        return { ok: false, error: "not a select" };
+      }
+      const wantStr = String(want);
+      let matched = false;
+      for (const opt of el.options) {
+        if (opt.value === wantStr || (opt.textContent || "").trim() === wantStr) {
+          el.value = opt.value;
+          matched = true;
+          break;
+        }
+      }
+      if (!matched) return { ok: false, error: "option not found: " + wantStr };
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+      return { ok: true, value: el.value };
+    },
+    args: [uid, value],
+  });
+  const hit = (injections || []).find((inj) => inj.result);
+  if (!hit || !hit.result.ok) {
+    throw new Error((hit && hit.result && hit.result.error) || "select_option failed");
+  }
+  return hit.result;
 }
 
 async function press(tabId, key) {
@@ -511,7 +834,8 @@ async function evaluate(tabId, fnSource) {
   return { value: out.result ? out.result.value : null };
 }
 
-async function screenshot(tabId) {
+async function screenshot(tabId, params = {}) {
+  await maybeWait(tabId, params);
   const target = await attachCdp(tabId);
   const out = await chrome.debugger.sendCommand(target, "Page.captureScreenshot", {
     format: "png",
@@ -520,8 +844,24 @@ async function screenshot(tabId) {
   return { pngBase64: out.data };
 }
 
+chrome.tabs.onRemoved.addListener((tabId) => {
+  grokTabIds.delete(tabId);
+  lastSnap.delete(tabId);
+  try {
+    detachCdp(tabId);
+  } catch {
+    // ignore
+  }
+});
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg && msg.type === "gbc-wake") {
+    connect();
+    sendResponse({ ok: true });
+    return;
+  }
   if (msg && msg.type === "gbc-should-paint") {
+    connect();
     const tabId = sender.tab && sender.tab.id;
     refreshGrokTabs()
       .then(() => sendResponse({ paint: Boolean(tabId && grokTabIds.has(tabId)) }))

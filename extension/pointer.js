@@ -159,6 +159,11 @@
     show();
   };
   try {
+    chrome.runtime.sendMessage({ type: "gbc-wake" });
+  } catch {
+    // ignore
+  }
+  try {
     chrome.runtime.sendMessage({ type: "gbc-should-paint" }, (res) => {
       allowed = Boolean(res && res.paint);
       if (allowed) boot();
@@ -171,4 +176,11 @@
   setInterval(() => {
     if (allowed && !document.getElementById(ROOT_ID)) boot();
   }, 1000);
+  setInterval(() => {
+    try {
+      chrome.runtime.sendMessage({ type: "gbc-wake" });
+    } catch {
+      // ignore
+    }
+  }, 10000);
 })();

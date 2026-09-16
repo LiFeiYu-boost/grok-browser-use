@@ -446,6 +446,31 @@ export async function cssForUid(tabId, uid) {
   };
 }
 
+export async function dispatchMouse(tabId, { type, x, y, button = "left", clickCount = 1 }) {
+  const target = await attachCdp(tabId);
+  const params = {
+    type,
+    x: Number(x),
+    y: Number(y),
+    pointerType: "mouse",
+  };
+  if (type === "mousePressed" || type === "mouseReleased") {
+    params.button = button;
+    params.clickCount = clickCount;
+  }
+  await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", params);
+}
+
+export async function cdpHover(tabId, x, y) {
+  await dispatchMouse(tabId, { type: "mouseMoved", x, y });
+}
+
+export async function cdpClick(tabId, x, y) {
+  await dispatchMouse(tabId, { type: "mouseMoved", x, y });
+  await dispatchMouse(tabId, { type: "mousePressed", x, y, button: "left", clickCount: 1 });
+  await dispatchMouse(tabId, { type: "mouseReleased", x, y, button: "left", clickCount: 1 });
+}
+
 chrome.debugger.onEvent.addListener(onEvent);
 chrome.debugger.onDetach.addListener((source) => {
   if (source.tabId != null) detachCdp(source.tabId);

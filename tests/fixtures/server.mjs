@@ -73,6 +73,61 @@ export function startFixtureServer() {
       );
       return;
     }
+    if (url.pathname === "/kitchen-frame") {
+      res.end(`<!doctype html>
+<meta charset="utf-8">
+<title>Kitchen frame</title>
+<button id="inner">Inside iframe</button>
+<script>
+document.getElementById("inner").onclick = () => {
+  try { parent.document.getElementById("status").textContent = "iframe"; } catch (e) {}
+};
+</script>`);
+      return;
+    }
+    if (url.pathname === "/kitchen") {
+      res.end(`<!doctype html>
+<meta charset="utf-8">
+<title>Kitchen</title>
+<h1>Kitchen</h1>
+<button id="logout">退出登录</button>
+<button id="ok">Continue</button>
+<div id="card" role="button" tabindex="0">Open card</div>
+<label>Color
+  <select id="color">
+    <option value="red">Red</option>
+    <option value="blue">Blue</option>
+  </select>
+</label>
+<div id="menu-wrap">
+  <button id="menu">Menu</button>
+  <div id="menu-pop" hidden>Hovered</div>
+</div>
+<iframe id="kid" src="/kitchen-frame" style="width:240px;height:80px;border:1px solid #ccc"></iframe>
+<p id="status">idle</p>
+<p id="pad" style="height:1200px">scroll pad</p>
+<button id="bottom">Bottom</button>
+<script>
+const status = document.getElementById("status");
+document.getElementById("logout").onclick = () => { status.textContent = "logged-out"; };
+document.getElementById("ok").onclick = () => {
+  status.textContent = "ok";
+  fetch("/slow?ms=200").catch(() => {});
+};
+document.getElementById("card").onclick = () => { status.textContent = "card"; };
+document.getElementById("color").onchange = () => {
+  status.textContent = "color:" + document.getElementById("color").value;
+};
+const menu = document.getElementById("menu");
+const pop = document.getElementById("menu-pop");
+menu.addEventListener("mouseenter", () => {
+  pop.hidden = false;
+  status.textContent = "hovered";
+});
+document.getElementById("bottom").onclick = () => { status.textContent = "bottom"; };
+</script>`);
+      return;
+    }
     if (url.pathname === "/diag") {
       res.end(`<!doctype html>
 <meta charset="utf-8">

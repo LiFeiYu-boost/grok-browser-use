@@ -3,7 +3,11 @@ import fs from "node:fs";
 import path from "node:path";
 import { Broker } from "../lib/broker.mjs";
 import { launchCft, killCftTree, killLaunchedCft } from "../lib/launch-cft.mjs";
-import { installNativeHostManifest } from "../lib/install-host-manifest.mjs";
+import {
+  installNativeHostManifest,
+  pauseDailyNativeHost,
+  restoreDailyNativeHost,
+} from "../lib/install-host-manifest.mjs";
 import { encodeLspMessage, createLspDecoder } from "../lib/native-framing.mjs";
 import {
   MODE_PATH,
@@ -16,7 +20,8 @@ import {
 const TOOLS = [
   {
     name: "status",
-    description: "Browser-control connection status. Does not activate any window.",
+    description:
+      "grok-browser-use connection status (connected/connecting/disconnected). Does not activate any window. MCP stays up even if the extension is asleep.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
@@ -33,6 +38,7 @@ const TOOLS = [
       properties: {
         url: { type: "string" },
         show: { type: "boolean", description: "Default true. Set false to keep the tab backgrounded." },
+        wait: { type: "boolean", description: "Default true. Wait for network idle after load." },
       },
       required: ["url"],
       additionalProperties: false,
@@ -50,7 +56,8 @@ const TOOLS = [
   },
   {
     name: "snapshot",
-    description: "Accessibility-ish snapshot with uids for click/fill. Does not activate the tab.",
+    description:
+      "Compact a11y snapshot (role/name/destructive/inViewport) with uids, including same-origin iframes. Does not activate the tab.",
     inputSchema: {
       type: "object",
       properties: { tabId: { type: "number" } },
@@ -60,7 +67,23 @@ const TOOLS = [
   },
   {
     name: "click",
-    description: "Click an element by snapshot uid. Coordinate clicks and window drags are not available.",
+    description:
+      "Click a snapshot uid with a real CDP mouse event. Destructive controls (logout/delete) are refused unless confirmDestructive is true. Waits for network idle unless wait is false.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tabId: { type: "number" },
+        uid: { type: "string" },
+        confirmDestructive: { type: "boolean" },
+        wait: { type: "boolean" },
+      },
+      required: ["tabId", "uid"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "hover",
+    description: "Move the pointer onto a snapshot uid (CDP mouseMoved). Does not click.",
     inputSchema: {
       type: "object",
       properties: { tabId: { type: "number" }, uid: { type: "string" } },
@@ -69,14 +92,46 @@ const TOOLS = [
     },
   },
   {
-    name: "fill",
-    description: "Fill an input by snapshot uid.",
+    name: "scroll",
+    description: "Scroll a uid into view, or scroll the page by dx/dy CSS pixels.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tabId: { type: "number" },
+        uid: { type: "string" },
+        dx: { type: "number" },
+        dy: { type: "number" },
+      },
+      required: ["tabId"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "select_option",
+    description: "Choose an option in a <select> by value or visible label.",
     inputSchema: {
       type: "object",
       properties: {
         tabId: { type: "number" },
         uid: { type: "string" },
         value: { type: "string" },
+        label: { type: "string" },
+      },
+      required: ["tabId", "uid"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "fill",
+    description: "Fill an input by snapshot uid. Destructive fields need confirmDestructive.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tabId: { type: "number" },
+        uid: { type: "string" },
+        value: { type: "string" },
+        confirmDestructive: { type: "boolean" },
+        wait: { type: "boolean" },
       },
       required: ["tabId", "uid", "value"],
       additionalProperties: false,
@@ -104,12 +159,13 @@ const TOOLS = [
   },
   {
     name: "screenshot",
-    description: "PNG screenshot of a tab via CDP. Saves under tests/artifacts if fileName is set.",
+    description: "PNG screenshot of a tab via CDP. Waits for network idle unless wait is false. Saves under tests/artifacts if fileName is set.",
     inputSchema: {
       type: "object",
       properties: {
         tabId: { type: "number" },
         fileName: { type: "string" },
+        wait: { type: "boolean" },
       },
       required: ["tabId"],
       additionalProperties: false,
@@ -118,7 +174,7 @@ const TOOLS = [
   {
     name: "run_parallel",
     description:
-      "Run many tab operations at once. Each op is {tabId, op, ...}. op: snapshot|click|fill|press|evaluate|screenshot.",
+      "Run many tab operations at once. Each op is {tabId, op, ...}. op: snapshot|click|fill|press|evaluate|screenshot|hover|scroll|select_option.",
     inputSchema: {
       type: "object",
       properties: {
@@ -246,6 +302,24 @@ class BrowserControlServer {
     this.launched = null;
     this.mode = "daily";
     this.started = null;
+    this.pausedDailyHost = null;
+  }
+
+  connectionState() {
+    if (this.broker.active && !this.broker.active.destroyed) return "connected";
+    return this.started && this.started.connecting ? "connecting" : "disconnected";
+  }
+
+  async ensureConnected(timeoutMs = 15000) {
+    if (this.broker.active && !this.broker.active.destroyed) return;
+    try {
+      await this.broker.waitReady(timeoutMs);
+    } catch (err) {
+      throw new Error(
+        "grok-browser-use is not connected. Open Google Chrome with the unpacked grok-browser-use extension loaded. " +
+          String(err && err.message ? err.message : err)
+      );
+    }
   }
 
   async startBrowser() {
@@ -253,17 +327,42 @@ class BrowserControlServer {
     const target = process.env.GROK_BROWSER_TARGET || "daily";
     this.mode = target === "cft" ? "headless" : "daily";
     writeRuntimeConfig({ mode: this.mode, target });
-    installNativeHostManifest(null, { dailyChrome: true });
+    if (this.mode === "daily") {
+      installNativeHostManifest(null, { dailyChrome: true });
+    } else {
+      this.pausedDailyHost = pauseDailyNativeHost();
+      installNativeHostManifest(null, { dailyChrome: false });
+    }
     await this.broker.start();
     if (this.mode === "daily") {
-      const ready = await this.broker.waitReady(20000);
       this.started = {
-        ready,
         pid: null,
         mode: this.mode,
         target: "daily",
-        note: "attached to daily Google Chrome; will not kill Chrome on shutdown",
+        connecting: true,
+        note: "lazy attach to daily Google Chrome; MCP stays up if the extension is asleep",
       };
+      this.broker
+        .waitReady(60000)
+        .then((ready) => {
+          this.started = {
+            ready,
+            pid: null,
+            mode: this.mode,
+            target: "daily",
+            connecting: false,
+            connected: true,
+            note: "attached to daily Google Chrome; will not kill Chrome on shutdown",
+          };
+        })
+        .catch((err) => {
+          this.started = {
+            ...this.started,
+            connecting: false,
+            connected: false,
+            error: String(err && err.message ? err.message : err),
+          };
+        });
       return this.started;
     }
     this.launched = launchCft({
@@ -285,6 +384,12 @@ class BrowserControlServer {
       this.launched = null;
       return;
     }
+    try {
+      restoreDailyNativeHost(this.pausedDailyHost);
+    } catch {
+      // restore daily native host after CfT tests
+    }
+    this.pausedDailyHost = null;
     if (this.launched) {
       killCftTree(this.launched.pid);
       this.launched = null;
@@ -303,14 +408,22 @@ class BrowserControlServer {
     if (args.show === true) {
       this.broker.recordAudit("show", { tool: name, args });
     }
+    if (name !== "status") {
+      await this.ensureConnected();
+    }
     switch (name) {
       case "status":
         return {
-          connected: Boolean(this.broker.active),
+          connected: Boolean(this.broker.active && !this.broker.active.destroyed),
+          connectionState: this.connectionState(),
           mode: this.mode,
           extensionId: EXTENSION_ID,
           pid: this.launched && this.launched.pid,
           started: this.started,
+          hint:
+            this.broker.active && !this.broker.active.destroyed
+              ? undefined
+              : "Open Google Chrome with the unpacked grok-browser-use extension. Native host com.xai.grok.browser must be installed.",
         };
       case "list_tabs":
         return await this.broker.request("tabs.list");
@@ -318,6 +431,7 @@ class BrowserControlServer {
         return await this.broker.request("tabs.create", {
           url: args.url,
           show: args.show !== false,
+          wait: args.wait,
         });
       case "close_tab":
         return await this.broker.request("tabs.close", { tabId: args.tabId });
@@ -327,12 +441,35 @@ class BrowserControlServer {
         return await this.broker.request("tabs.click", {
           tabId: args.tabId,
           uid: args.uid,
+          confirmDestructive: args.confirmDestructive,
+          wait: args.wait,
+        });
+      case "hover":
+        return await this.broker.request("tabs.hover", {
+          tabId: args.tabId,
+          uid: args.uid,
+        });
+      case "scroll":
+        return await this.broker.request("tabs.scroll", {
+          tabId: args.tabId,
+          uid: args.uid,
+          dx: args.dx,
+          dy: args.dy,
+        });
+      case "select_option":
+        return await this.broker.request("tabs.selectOption", {
+          tabId: args.tabId,
+          uid: args.uid,
+          value: args.value,
+          label: args.label,
         });
       case "fill":
         return await this.broker.request("tabs.fill", {
           tabId: args.tabId,
           uid: args.uid,
           value: args.value,
+          confirmDestructive: args.confirmDestructive,
+          wait: args.wait,
         });
       case "press":
         return await this.broker.request("tabs.press", {
@@ -345,7 +482,7 @@ class BrowserControlServer {
           function: args.function,
         });
       case "screenshot":
-        return await this.saveScreenshot(args.tabId, args.fileName);
+        return await this.saveScreenshot(args.tabId, args.fileName, args.wait);
       case "run_parallel":
         return await this.runParallel(args.ops || []);
       case "audit_log": {
@@ -390,8 +527,8 @@ class BrowserControlServer {
     }
   }
 
-  async saveScreenshot(tabId, fileName) {
-    const shot = await this.broker.request("tabs.screenshot", { tabId });
+  async saveScreenshot(tabId, fileName, wait) {
+    const shot = await this.broker.request("tabs.screenshot", { tabId, wait });
     const name = fileName || `tab-${tabId}.png`;
     const filePath = path.join(ARTIFACTS_DIR, name);
     fs.mkdirSync(ARTIFACTS_DIR, { recursive: true });
@@ -452,13 +589,15 @@ async function main() {
           result: {
             protocolVersion: "2024-11-05",
             capabilities: { tools: {} },
-            serverInfo: { name: "grok-browser-use", version: "0.5.0" },
+            serverInfo: { name: "grok-browser-use", version: "0.6.0" },
           },
         });
         return;
       }
       if (method === "notifications/initialized") {
-        await starting;
+        starting.catch((err) => {
+          process.stderr.write(`browser start background: ${err}\n`);
+        });
         return;
       }
       if (method === "tools/list") {
@@ -514,7 +653,6 @@ async function main() {
 
   starting = starting.catch((err) => {
     process.stderr.write(`browser start failed: ${err}\n`);
-    throw err;
   });
 }
 

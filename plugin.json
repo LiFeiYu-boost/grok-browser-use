@@ -1,6 +1,6 @@
 {
   "name": "grok-browser-use",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Drive your daily Chrome from Grok: tab group, visible pointer, background CDP console/network. Native messaging, no remote-debugging port.",
   "keywords": ["browser", "chrome", "acceptance", "native-messaging", "cdp", "grok"]
 }

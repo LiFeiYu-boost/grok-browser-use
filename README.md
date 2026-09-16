@@ -21,6 +21,7 @@ Chrome 136+ ignores `--remote-debugging-port` on the default user-data-dir. [bro
 - **Always-on pointer** — a comet cursor stays on agent pages; it is not a flash on click
 - **Background CDP** — `Runtime` + `Network` on those tabs: console (with stacks), request list, one-request headers + truncated body, TTFB/FCP, computed styles. DevTools UI stays closed
 - **wait_for** — wait for network idle, a console pattern, or a selector before you screenshot
+- **Safe clicks** — snapshot marks logout/delete as `destructive`; CDP mouse events, not synthetic `el.click()`
 - **No port 9222** — you do not have to enable `chrome://inspect/#remote-debugging`
 
 ## Architecture
@@ -67,9 +68,12 @@ Start a **new** Grok session. The MCP entry is `.mcp.json` → `scripts/run-mcp.
 | Action | Tools |
 |------|------|
 | Open, click, type, screenshot | `new_tab` `snapshot` `click` `fill` `screenshot` `run_parallel` |
-| Wait until stable | `wait_for` (`networkIdle` / `consolePattern` / `selector`) |
+| Hover, scroll, select | `hover` `scroll` `select_option` |
+| Wait until stable | `wait_for` (`networkIdle` / `consolePattern` / `selector`); `click` / `screenshot` wait by default |
 | Requests and logs | `network` `get_network_request` `console` `get_console_message` |
 | Perf and CSS | `performance` `css_styles` |
+
+Logout / delete controls are marked `destructive` in `snapshot`. `click` refuses them unless you pass `confirmDestructive: true`. MCP stays up if the extension is asleep (`status.connectionState`).
 
 Collection is limited to the **Grok Browser** group. Your other tabs are left alone.
 
