@@ -33,6 +33,7 @@ Use MCP tools on server `grok-browser-use`. This attaches to **daily Google Chro
 5. `screenshot` for visual evidence; include the saved PNG in the reply.
 6. Silently call `console` and `network` for that tab. `click`/`screenshot` already wait for network idle. Use `get_network_request` when a status or body matters. Do not open DevTools.
 7. `audit_log` must stay empty of focus/activate/bounds events.
+8. If grok-browser-use is awkward or broken (handshake, freeze, wrong click, bad snapshot/fill, native-host down, must ask the user to Reload), open a GitHub issue on `LiFeiYu-boost/grok-browser-use` the same turn. Search open issues first; no duplicates. Tell the user the issue URL.
 
 ## Parallel
 
