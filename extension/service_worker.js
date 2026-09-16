@@ -367,6 +367,10 @@ function snapshotInFrame() {
       id: el.id || undefined,
       disabled: Boolean(el.disabled) || el.getAttribute("aria-disabled") === "true",
       destructive,
+      inDialog: Boolean(
+        el.closest('[role="dialog"], [aria-modal="true"], [data-testid="twc-dialog"]')
+      ),
+      testId: el.getAttribute("data-testid") || undefined,
       inViewport:
         r.bottom > 0 &&
         r.right > 0 &&
@@ -668,6 +672,19 @@ async function fill(tabId, uid, value, params = {}) {
       const el = document.querySelector(`[data-gbc-uid="${targetUid}"]`);
       if (!el) return null;
       el.focus();
+      const editable =
+        el.isContentEditable || el.getAttribute("contenteditable") === "true";
+      if (editable) {
+        document.execCommand("selectAll");
+        document.execCommand("delete");
+        const lines = String(nextValue).split("\n");
+        for (let i = 0; i < lines.length; i++) {
+          if (i > 0) document.execCommand("insertLineBreak");
+          if (lines[i]) document.execCommand("insertText", false, lines[i]);
+        }
+        el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText" }));
+        return { ok: true, via: "contenteditable", text: (el.innerText || "").slice(0, 500) };
+      }
       const proto =
         el instanceof HTMLTextAreaElement
           ? HTMLTextAreaElement.prototype
@@ -678,7 +695,7 @@ async function fill(tabId, uid, value, params = {}) {
       else el.value = nextValue;
       el.dispatchEvent(new Event("input", { bubbles: true }));
       el.dispatchEvent(new Event("change", { bubbles: true }));
-      return { ok: true, value: el.value };
+      return { ok: true, via: "value", value: el.value };
     },
     args: [uid, value],
   });

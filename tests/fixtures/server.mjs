@@ -104,6 +104,7 @@ document.getElementById("inner").onclick = () => {
   <div id="menu-pop" hidden>Hovered</div>
 </div>
 <iframe id="kid" src="/kitchen-frame" style="width:240px;height:80px;border:1px solid #ccc"></iframe>
+<div id="editor" role="textbox" contenteditable="true" style="border:1px solid #ccc;min-height:4em;padding:8px"></div>
 <p id="status">idle</p>
 <p id="pad" style="height:1200px">scroll pad</p>
 <button id="bottom">Bottom</button>

@@ -2,7 +2,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { Broker } from "../lib/broker.mjs";
-import { launchCft, killCftTree, killLaunchedCft } from "../lib/launch-cft.mjs";
+import { launchCft, killCftTree, killLaunchedCft, writeCftHostWrapper } from "../lib/launch-cft.mjs";
 import {
   installNativeHostManifest,
   pauseDailyNativeHost,
@@ -12,6 +12,7 @@ import { encodeLspMessage, createLspDecoder } from "../lib/native-framing.mjs";
 import {
   MODE_PATH,
   ARTIFACTS_DIR,
+  RUN_DIR,
   writeRuntimeConfig,
   EXTENSION_ID,
   ensureRunDir,
@@ -310,10 +311,11 @@ class BrowserControlServer {
     return this.started && this.started.connecting ? "connecting" : "disconnected";
   }
 
-  async ensureConnected(timeoutMs = 15000) {
+  async ensureConnected(timeoutMs) {
     if (this.broker.active && !this.broker.active.destroyed) return;
+    const waitMs = timeoutMs || (this.mode === "daily" ? 45000 : 15000);
     try {
-      await this.broker.waitReady(timeoutMs);
+      await this.broker.waitReady(waitMs);
     } catch (err) {
       throw new Error(
         "grok-browser-use is not connected. Open Google Chrome with the unpacked grok-browser-use extension loaded. " +
@@ -326,14 +328,22 @@ class BrowserControlServer {
     ensureRunDir();
     const target = process.env.GROK_BROWSER_TARGET || "daily";
     this.mode = target === "cft" ? "headless" : "daily";
-    writeRuntimeConfig({ mode: this.mode, target });
     if (this.mode === "daily") {
+      writeRuntimeConfig({ mode: this.mode, target });
       installNativeHostManifest(null, { dailyChrome: true });
+      await this.broker.start();
     } else {
-      this.pausedDailyHost = pauseDailyNativeHost();
-      installNativeHostManifest(null, { dailyChrome: false });
+      const cftSock = path.join(RUN_DIR, `cft-${process.pid}.sock`);
+      this.broker = new Broker({ socketPath: cftSock });
+      const wrapper = writeCftHostWrapper(cftSock);
+      this.launched = launchCft({
+        mode: "headless",
+        userDataDir: path.join(ARTIFACTS_DIR, `cft-mcp-${process.pid}`),
+        hostPath: wrapper,
+        socketPath: cftSock,
+      });
+      await this.broker.start();
     }
-    await this.broker.start();
     if (this.mode === "daily") {
       this.started = {
         pid: null,
@@ -365,10 +375,6 @@ class BrowserControlServer {
         });
       return this.started;
     }
-    this.launched = launchCft({
-      mode: "headless",
-      userDataDir: path.join(ARTIFACTS_DIR, `cft-mcp-${process.pid}`),
-    });
     const ready = await this.broker.waitReady(25000);
     this.started = { ready, pid: this.launched.pid, mode: "headless", target: "cft" };
     return this.started;
@@ -589,7 +595,7 @@ async function main() {
           result: {
             protocolVersion: "2024-11-05",
             capabilities: { tools: {} },
-            serverInfo: { name: "grok-browser-use", version: "0.6.0" },
+            serverInfo: { name: "grok-browser-use", version: "0.6.2" },
           },
         });
         return;

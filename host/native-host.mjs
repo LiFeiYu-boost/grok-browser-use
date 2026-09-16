@@ -30,9 +30,7 @@ function log(line) {
 }
 
 function loadConfig() {
-  if (!fs.existsSync(configPath)) {
-    throw new Error(`missing runtime config: ${configPath}`);
-  }
+  if (!fs.existsSync(configPath)) return {};
   return JSON.parse(fs.readFileSync(configPath, "utf8"));
 }
 
@@ -41,14 +39,47 @@ function connectSocket(socketPath) {
     const sock = net.connect(socketPath);
     sock.setEncoding("utf8");
     sock.once("connect", () => resolve(sock));
-    sock.once("error", reject);
+    sock.once("error", (err) => {
+      try {
+        sock.destroy();
+      } catch {
+        // ignore
+      }
+      reject(err);
+    });
   });
+}
+
+async function connectSocketRetry(socketPath, timeoutMs = 90000) {
+  const started = Date.now();
+  let lastErr;
+  let attempt = 0;
+  while (Date.now() - started < timeoutMs) {
+    attempt += 1;
+    try {
+      return await connectSocket(socketPath);
+    } catch (err) {
+      lastErr = err;
+      if (attempt === 1 || attempt % 8 === 0) {
+        log({
+          event: "socket-wait",
+          socketPath,
+          attempt,
+          error: String(err && err.message ? err.message : err),
+        });
+      }
+      await new Promise((r) => setTimeout(r, 250));
+    }
+  }
+  throw lastErr || new Error("broker socket never appeared: " + socketPath);
 }
 
 async function main() {
   const config = loadConfig();
-  log({ event: "start", socketPath: config.socketPath, ppid: process.ppid });
-  const sock = await connectSocket(config.socketPath);
+  const socketPath = process.env.GROK_BROWSER_SOCKET || config.socketPath;
+  if (!socketPath) throw new Error("no socketPath (set GROK_BROWSER_SOCKET or run/config.json)");
+  log({ event: "start", socketPath, envSocket: Boolean(process.env.GROK_BROWSER_SOCKET), ppid: process.ppid });
+  const sock = await connectSocketRetry(socketPath);
   log({ event: "socket-connected" });
 
   let socketBuf = "";

@@ -110,6 +110,25 @@ async function main() {
     });
     assert.match(String(afterIframe.value), /iframe/);
 
+    const editor = uidFor(snap, (n) => n.id === "editor" || n.role === "textbox");
+    const draft = "line1\n\nhttps://example.com/gbu\n\n@grok hi";
+    const filled = await mcp.callTool("fill", { tabId, uid: editor.uid, value: draft });
+    report.filled = filled;
+    const afterFill = await mcp.callTool("evaluate", {
+      tabId,
+      function: "() => document.getElementById('editor')?.innerText || ''",
+    });
+    const filledText = String(afterFill.value || "");
+    assert.match(filledText, /line1/);
+    assert.match(filledText, /example\.com\/gbu/);
+    assert.match(filledText, /@grok hi/);
+    assert.equal(
+      /gbu@grok/.test(filledText),
+      false,
+      "url glued to mention: " + JSON.stringify(filledText)
+    );
+    assert.match(filledText, /gbu[\s\n]+@grok/);
+
     await mcp.callTool("scroll", { tabId, uid: bottom.uid });
     await mcp.callTool("click", { tabId, uid: bottom.uid });
     const afterBottom = await mcp.callTool("evaluate", {

@@ -20,7 +20,7 @@ Use MCP tools on server `grok-browser-use` (some installs still expose `grok-bro
 - A visible comet pointer on agent pages is expected.
 - Default `new_tab` is visible (`show` omitted). Use `show: false` only when the user must not be interrupted.
 - Never drag, resize, or steal OS-window focus.
-- Click/fill only with uids from the latest `snapshot` of that tab.
+- Click/fill only with uids from the latest `snapshot` of that tab. For compose dialogs (X/Twitter `发帖`), prefer the uid with `inDialog: true` / `testId: tweetButton`, not the sidebar button.
 - Do not click logout / 退出登录 / delete / 解除连接 unless the user asked. Snapshot marks these `destructive`; click refuses them without `confirmDestructive: true`.
 - Do not close or navigate the user's existing tabs unless they asked.
 - Prefer a scratch tab, then close it.
