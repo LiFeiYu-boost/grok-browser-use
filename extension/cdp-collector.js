@@ -48,7 +48,32 @@ function pushLimited(arr, item) {
   if (arr.length > MAX_PER_NAV) arr.splice(0, arr.length - MAX_PER_NAV);
 }
 
+export function cdpDeniedUrl(url) {
+  const s = String(url || "");
+  try {
+    const host = new URL(s).hostname.toLowerCase();
+    return (
+      /(^|\.)tiktok\.com$/.test(host) ||
+      /(^|\.)tiktokshop\.com$/.test(host) ||
+      /(^|\.)bytedance\.com$/.test(host)
+    );
+  } catch {
+    return /tiktok|tiktokshop|bytedance/i.test(s);
+  }
+}
+
+export async function tabCdpDenied(tabId) {
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  return cdpDeniedUrl(tab && tab.url);
+}
+
 export async function attachCdp(tabId) {
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  if (cdpDeniedUrl(tab && tab.url)) {
+    const err = new Error("cdp denied for origin: " + ((tab && tab.url) || tabId));
+    err.code = "CDP_DENIED";
+    throw err;
+  }
   const target = { tabId };
   if (!attached.has(tabId)) {
     try {
@@ -75,6 +100,24 @@ export async function attachCdp(tabId) {
 export function detachCdp(tabId) {
   attached.delete(tabId);
   stores.delete(tabId);
+  chrome.debugger.detach({ tabId }).catch(() => {});
+}
+
+export async function detachAllCdp() {
+  const ids = [...attached];
+  for (const tabId of ids) detachCdp(tabId);
+  const targets = await chrome.debugger.getTargets().catch(() => []);
+  for (const target of targets) {
+    if (target.tabId == null || !target.attached) continue;
+    try {
+      await chrome.debugger.detach({ tabId: target.tabId });
+    } catch {
+      // already detached
+    }
+    attached.delete(target.tabId);
+    stores.delete(target.tabId);
+  }
+  return { detached: ids.length };
 }
 
 export function listConsole(tabId, params = {}) {

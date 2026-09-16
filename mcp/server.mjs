@@ -20,6 +20,18 @@ import {
 
 const TOOLS = [
   {
+    name: "debugger_detach_all",
+    description:
+      "Detach chrome.debugger from every tab this extension attached. Use if a TikTok/Partner page went white or SSO login no-ops.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "probes_unregister",
+    description:
+      "Unregister MAIN-world fetch/XHR probes. They are not injected on tiktok.com / tiktokshop.com.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
     name: "status",
     description:
       "grok-browser-use connection status (connected/connecting/disconnected). Does not activate any window. MCP stays up even if the extension is asleep.",
@@ -431,6 +443,10 @@ class BrowserControlServer {
               ? undefined
               : "Open Google Chrome with the unpacked grok-browser-use extension. Native host com.xai.grok.browser must be installed.",
         };
+      case "debugger_detach_all":
+        return await this.broker.request("debugger.detachAll");
+      case "probes_unregister":
+        return await this.broker.request("probes.unregister");
       case "list_tabs":
         return await this.broker.request("tabs.list");
       case "new_tab":
@@ -595,7 +611,7 @@ async function main() {
           result: {
             protocolVersion: "2024-11-05",
             capabilities: { tools: {} },
-            serverInfo: { name: "grok-browser-use", version: "0.6.2" },
+            serverInfo: { name: "grok-browser-use", version: "0.6.3" },
           },
         });
         return;

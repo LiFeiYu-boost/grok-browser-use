@@ -1,6 +1,9 @@
 import {
   attachCdp,
   detachCdp,
+  detachAllCdp,
+  cdpDeniedUrl,
+  tabCdpDenied,
   listConsole as cdpListConsole,
   getConsole as cdpGetConsole,
   listNetwork as cdpListNetwork,
@@ -121,6 +124,15 @@ async function dispatch(method, params) {
       return await snapshot(params.tabId);
     case "tabs.click":
       return await click(params.tabId, params.uid, params);
+    case "tabs.domClick":
+      return await domClick(params.tabId, params.uid, params);
+    case "debugger.detachAll":
+      return await detachAllCdp();
+    case "probes.unregister":
+      await chrome.scripting
+        .unregisterContentScripts({ ids: ["gbc-probe-main", "gbc-probe-bridge"] })
+        .catch(() => {});
+      return { ok: true };
     case "tabs.fill":
       return await fill(params.tabId, params.uid, params.value, params);
     case "tabs.press":
@@ -194,30 +206,38 @@ async function addToGrokGroup(tab) {
   return groupId;
 }
 
+const PROBE_EXCLUDE = [
+  "*://*.tiktok.com/*",
+  "*://tiktok.com/*",
+  "*://*.tiktokshop.com/*",
+  "*://tiktokshop.com/*",
+  "*://*.bytedance.com/*",
+  "*://bytedance.com/*",
+];
+
 async function registerProbes() {
-  const existing = await chrome.scripting.getRegisteredContentScripts();
-  const ids = new Set(existing.map((s) => s.id));
-  const scripts = [];
-  if (!ids.has("gbc-probe-main")) {
-    scripts.push({
+  await chrome.scripting
+    .unregisterContentScripts({ ids: ["gbc-probe-main", "gbc-probe-bridge"] })
+    .catch(() => {});
+  await chrome.scripting.registerContentScripts([
+    {
       id: "gbc-probe-main",
       js: ["probe-main.js"],
       matches: ["http://*/*", "https://*/*"],
+      excludeMatches: PROBE_EXCLUDE,
       runAt: "document_start",
       world: "MAIN",
-      persistAcrossSessions: true,
-    });
-  }
-  if (!ids.has("gbc-probe-bridge")) {
-    scripts.push({
+      persistAcrossSessions: false,
+    },
+    {
       id: "gbc-probe-bridge",
       js: ["probe-bridge.js"],
       matches: ["http://*/*", "https://*/*"],
+      excludeMatches: PROBE_EXCLUDE,
       runAt: "document_start",
-      persistAcrossSessions: true,
-    });
-  }
-  if (scripts.length) await chrome.scripting.registerContentScripts(scripts);
+      persistAcrossSessions: false,
+    },
+  ]);
 }
 
 async function createTab(params) {
@@ -232,10 +252,14 @@ async function createTab(params) {
   });
   grokTabIds.add(tab.id);
   const groupId = await addToGrokGroup(tab);
-  await attachCdp(tab.id).catch(() => {});
+  const dest = String(params.url || "");
+  const skipDebugger = cdpDeniedUrl(dest);
+  if (!skipDebugger) await attachCdp(tab.id).catch(() => {});
   await chrome.tabs.update(tab.id, { url: params.url });
   await waitComplete(tab.id);
-  if (params.wait !== false) {
+  const loadedUrl = (await chrome.tabs.get(tab.id).catch(() => tab)).url || dest;
+  if (cdpDeniedUrl(loadedUrl)) detachCdp(tab.id);
+  if (params.wait !== false && !cdpDeniedUrl(loadedUrl)) {
     await waitNetworkIdle(tab.id, {
       idleMs: Number(params.idleMs) || 300,
       timeoutMs: Number(params.timeoutMs) || 2500,
@@ -587,15 +611,17 @@ async function ensurePointer(tabId) {
     target: { tabId },
     files: ["pointer.js"],
   }).catch(() => {});
-  await chrome.scripting.executeScript({
-    target: { tabId },
-    world: "MAIN",
-    files: ["probe-main.js"],
-  }).catch(() => {});
-  await chrome.scripting.executeScript({
-    target: { tabId },
-    files: ["probe-bridge.js"],
-  }).catch(() => {});
+  if (!(await tabCdpDenied(tabId))) {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      world: "MAIN",
+      files: ["probe-main.js"],
+    }).catch(() => {});
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: ["probe-bridge.js"],
+    }).catch(() => {});
+  }
   await chrome.scripting.executeScript({
     target: { tabId },
     func: () => window.__gbcPointer && window.__gbcPointer.show(),
@@ -634,8 +660,10 @@ async function click(tabId, uid, params = {}) {
   if (!loc.ok) throw new Error(loc.error || "uid not found");
   refuseDestructive(loc, params.confirmDestructive);
   await movePointerTo(tabId, loc.x, loc.y, true);
-  let via = "cdp";
+  const deny = await tabCdpDenied(tabId);
+  let via = deny ? "dom" : "cdp";
   try {
+    if (deny) throw new Error("cdp denied");
     await cdpClick(tabId, loc.x, loc.y);
   } catch {
     via = "dom";
@@ -658,6 +686,29 @@ async function click(tabId, uid, params = {}) {
   }
   await maybeWait(tabId, params);
   return { ok: true, uid, tag: loc.tag, name: loc.name, via };
+}
+
+async function domClick(tabId, uid, params = {}) {
+  const loc = await locateUid(tabId, uid);
+  if (!loc.ok) throw new Error(loc.error || "uid not found");
+  refuseDestructive(loc, params.confirmDestructive);
+  const injections = await chrome.scripting.executeScript({
+    target: { tabId, allFrames: true },
+    func: (targetUid) => {
+      const el = document.querySelector(`[data-gbc-uid="${targetUid}"]`);
+      if (!el) return null;
+      el.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
+      el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+      el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+      el.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      if (typeof el.click === "function") el.click();
+      return { ok: true, tag: el.tagName.toLowerCase() };
+    },
+    args: [uid],
+  });
+  const hit = (injections || []).find((inj) => inj.result && inj.result.ok);
+  if (!hit) throw new Error("domClick failed");
+  return { ok: true, uid, tag: loc.tag, name: loc.name, via: "dom" };
 }
 
 async function fill(tabId, uid, value, params = {}) {
@@ -711,6 +762,7 @@ async function hover(tabId, uid) {
   if (!loc.ok) throw new Error(loc.error || "uid not found");
   await movePointerTo(tabId, loc.x, loc.y, false);
   try {
+    if (await tabCdpDenied(tabId)) throw new Error("cdp denied");
     await cdpHover(tabId, loc.x, loc.y);
   } catch {
     await chrome.scripting.executeScript({
@@ -833,6 +885,18 @@ async function waitFor(params) {
 }
 
 async function evaluate(tabId, fnSource) {
+  if (await tabCdpDenied(tabId)) {
+    const injections = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: (src) => new Function(`return (${src})()`)(),
+      args: [fnSource],
+    });
+    return {
+      value: injections && injections[0] ? injections[0].result : null,
+      via: "scripting",
+      cdpDenied: true,
+    };
+  }
   const target = await attachCdp(tabId);
   const expression = `(${fnSource})()`;
   const out = await chrome.debugger.sendCommand(target, "Runtime.evaluate", {
@@ -851,6 +915,23 @@ async function evaluate(tabId, fnSource) {
 }
 
 async function screenshot(tabId, params = {}) {
+  if (await tabCdpDenied(tabId)) {
+    const tab = await chrome.tabs.get(tabId);
+    if (tab.active) {
+      const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
+      return {
+        pngBase64: String(dataUrl || "").replace(/^data:image\/png;base64,/, ""),
+        via: "captureVisibleTab",
+        cdpDenied: true,
+      };
+    }
+    return {
+      pngBase64: null,
+      skipped: true,
+      cdpDenied: true,
+      reason: "cdp denied on this origin; tab is not visible so no screenshot",
+    };
+  }
   await maybeWait(tabId, params);
   const target = await attachCdp(tabId);
   const out = await chrome.debugger.sendCommand(target, "Page.captureScreenshot", {
@@ -954,10 +1035,12 @@ chrome.tabGroups.onUpdated.addListener(() => {
 });
 chrome.runtime.onInstalled.addListener(() => {
   connect();
+  registerProbes().catch(() => {});
   paintGrokPointers().catch(() => {});
 });
 chrome.runtime.onStartup.addListener(() => {
   connect();
+  registerProbes().catch(() => {});
   paintGrokPointers().catch(() => {});
 });
 chrome.alarms.create("gbc-keepalive", { periodInMinutes: 0.5 });
