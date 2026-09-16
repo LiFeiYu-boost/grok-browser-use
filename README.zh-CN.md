@@ -65,6 +65,8 @@ ln -s "$(pwd)" ~/.grok/plugins/grok-browser-use
 
 **新开**一个 Grok 会话。MCP 入口是 `.mcp.json` → `scripts/run-mcp.sh`。
 
+安装后 Grok 会加载本仓库的 **`skills/grok-browser-use/SKILL.md`**（分组、指针、危险按钮、chrome-devtools 仅作 fallback）。Grok 用这个插件时如果觉得不顺手或有故障，会按 skill 给本仓库提 issue。
+
 ## Grok 可以调用的工具
 
 | 动作 | 工具 |

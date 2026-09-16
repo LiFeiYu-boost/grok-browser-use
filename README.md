@@ -63,6 +63,8 @@ ln -s "$(pwd)" ~/.grok/plugins/grok-browser-use
 
 Start a **new** Grok session. The MCP entry is `.mcp.json` → `scripts/run-mcp.sh`.
 
+Grok also loads **`skills/grok-browser-use/SKILL.md`** from this plugin (tab group, pointer, destructive clicks, fallback to chrome-devtools). If the plugin is awkward or broken while Grok is using it, that skill tells Grok to open an issue on this repo.
+
 ## What Grok can call
 
 | Action | Tools |
