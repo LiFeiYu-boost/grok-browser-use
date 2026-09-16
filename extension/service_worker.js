@@ -48,6 +48,7 @@ function connect() {
   }
   connecting = false;
   port.onMessage.addListener((msg) => {
+    reconnectDelayMs = 2000;
     handleCommand(msg).catch((err) => {
       if (msg && msg.id != null) {
         send({ id: msg.id, error: String(err && err.message ? err.message : err) });
@@ -60,7 +61,6 @@ function connect() {
     connecting = false;
     scheduleReconnect(last || "disconnected");
   });
-  reconnectDelayMs = 1000;
   send({
     type: "ready",
     extensionId: chrome.runtime.id,
@@ -68,14 +68,14 @@ function connect() {
   });
 }
 
-let reconnectDelayMs = 1000;
+let reconnectDelayMs = 2000;
 function scheduleReconnect(reason) {
   if (reconnectTimer) return;
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
     connect();
   }, reconnectDelayMs);
-  reconnectDelayMs = Math.min(reconnectDelayMs * 2, 15000);
+  reconnectDelayMs = Math.min(Math.max(reconnectDelayMs, 2000) * 2, 60000);
   sendFallback(reason);
 }
 
@@ -596,7 +596,6 @@ async function ensurePointer(tabId) {
     target: { tabId },
     func: () => window.__gbcPointer && window.__gbcPointer.show(),
   }).catch(() => {});
-  await attachCdp(tabId).catch(() => {});
 }
 
 async function paintGrokPointers() {
@@ -855,13 +854,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 });
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (msg && msg.type === "gbc-wake") {
-    connect();
-    sendResponse({ ok: true });
-    return;
-  }
   if (msg && msg.type === "gbc-should-paint") {
-    connect();
     const tabId = sender.tab && sender.tab.id;
     refreshGrokTabs()
       .then(() => sendResponse({ paint: Boolean(tabId && grokTabIds.has(tabId)) }))
@@ -933,7 +926,11 @@ if (chrome.webRequest) {
 chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
   if (info.status !== "complete") return;
   if (!tab.url || !/^https?:/.test(tab.url)) return;
-  paintGrokPointers().catch(() => {});
+  refreshGrokTabs()
+    .then(() => {
+      if (grokTabIds.has(tabId)) return ensurePointer(tabId);
+    })
+    .catch(() => {});
 });
 chrome.tabGroups.onUpdated.addListener(() => {
   paintGrokPointers().catch(() => {});
@@ -948,10 +945,7 @@ chrome.runtime.onStartup.addListener(() => {
 });
 chrome.alarms.create("gbc-keepalive", { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === "gbc-keepalive") {
-    connect();
-    paintGrokPointers().catch(() => {});
-  }
+  if (alarm.name === "gbc-keepalive") connect();
 });
 connect();
 registerProbes().catch(() => {});
