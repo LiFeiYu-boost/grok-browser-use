@@ -6,6 +6,7 @@ import { launchCft, killCftTree, killLaunchedCft, writeCftHostWrapper } from "..
 import { restoreDailyNativeHost } from "../lib/install-host-manifest.mjs";
 import { McpStdio } from "../lib/native-framing.mjs";
 import { ensureDailyBroker } from "../lib/broker-client.mjs";
+import { mcpSessionId, sessionGroupTitle, withSession } from "../lib/session-id.mjs";
 import {
   MODE_PATH,
   ARTIFACTS_DIR,
@@ -30,18 +31,28 @@ const TOOLS = [
   {
     name: "status",
     description:
-      "grok-browser-use connection status (connected/connecting/disconnected). Does not activate any window. MCP stays up even if the extension is asleep.",
+      "grok-browser-use connection status (connected/connecting/disconnected). Does not activate any window. MCP stays up even if the extension is asleep. Includes this Grok session's tab group.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
     name: "list_tabs",
-    description: "List open tabs in the attached Chrome (daily profile or isolated CfT). Does not activate them.",
-    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    description:
+      "List tabs in this Grok session's tab group (Grok Browser · <id>). Does not activate them. Pass scope=all to see every Grok session group (still not the user's other tabs).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        scope: {
+          type: "string",
+          description: "session (default) or all Grok Browser groups",
+        },
+      },
+      additionalProperties: false,
+    },
   },
   {
     name: "new_tab",
     description:
-      "Open a tab in the Grok Browser tab group. Shows a pointer overlay. Defaults to visible so the user can watch.",
+      "Open a tab in this Grok session's tab group (Grok Browser · <id>). Shows a pointer overlay. Defaults to visible so the user can watch.",
     inputSchema: {
       type: "object",
       properties: {
@@ -355,6 +366,15 @@ class BrowserControlServer {
     return this.started && this.started.connecting ? "connecting" : "disconnected";
   }
 
+  sessionMeta() {
+    const sessionId = mcpSessionId();
+    return { sessionId, tabGroup: sessionGroupTitle(sessionId) };
+  }
+
+  req(method, params = {}) {
+    return this.broker.request(method, withSession(params));
+  }
+
   async ensureConnected(timeoutMs) {
     if (this.brokerConnected()) return;
     const waitMs = timeoutMs || (this.mode === "daily" ? 45000 : 15000);
@@ -477,55 +497,63 @@ class BrowserControlServer {
           pid: this.launched && this.launched.pid,
           hubPid: this.broker && this.broker.hubPid,
           sharedBroker: this.sharedDaily,
+          ...this.sessionMeta(),
           started: this.started,
           hint: this.brokerConnected()
             ? undefined
             : "Open Google Chrome with the unpacked grok-browser-use extension. Native host com.xai.grok.browser must be installed.",
         };
       case "debugger_detach_all":
-        return await this.broker.request("debugger.detachAll");
+        return await this.req("debugger.detachAll");
       case "probes_unregister":
-        return await this.broker.request("probes.unregister");
-      case "list_tabs":
-        return await this.broker.request("tabs.list");
+        return await this.req("probes.unregister");
+      case "list_tabs": {
+        const rows = await this.req("tabs.list", { scope: args.scope });
+        const tabs = Array.isArray(rows) ? rows : (rows && rows.tabs) || [];
+        return {
+          ...this.sessionMeta(),
+          scope: args.scope === "all" ? "all" : "session",
+          tabs,
+        };
+      }
       case "new_tab":
-        return await this.broker.request("tabs.create", {
+        return await this.req("tabs.create", {
           url: args.url,
           show: args.show !== false,
           wait: args.wait,
         });
       case "close_tab":
-        return await this.broker.request("tabs.close", { tabId: args.tabId });
+        return await this.req("tabs.close", { tabId: args.tabId });
       case "snapshot":
-        return await this.broker.request("tabs.snapshot", { tabId: args.tabId });
+        return await this.req("tabs.snapshot", { tabId: args.tabId });
       case "click":
-        return await this.broker.request("tabs.click", {
+        return await this.req("tabs.click", {
           tabId: args.tabId,
           uid: args.uid,
           confirmDestructive: args.confirmDestructive,
           wait: args.wait,
         });
       case "hover":
-        return await this.broker.request("tabs.hover", {
+        return await this.req("tabs.hover", {
           tabId: args.tabId,
           uid: args.uid,
         });
       case "scroll":
-        return await this.broker.request("tabs.scroll", {
+        return await this.req("tabs.scroll", {
           tabId: args.tabId,
           uid: args.uid,
           dx: args.dx,
           dy: args.dy,
         });
       case "select_option":
-        return await this.broker.request("tabs.selectOption", {
+        return await this.req("tabs.selectOption", {
           tabId: args.tabId,
           uid: args.uid,
           value: args.value,
           label: args.label,
         });
       case "fill":
-        return await this.broker.request("tabs.fill", {
+        return await this.req("tabs.fill", {
           tabId: args.tabId,
           uid: args.uid,
           value: args.value,
@@ -533,19 +561,19 @@ class BrowserControlServer {
           wait: args.wait,
         });
       case "press":
-        return await this.broker.request("tabs.press", {
+        return await this.req("tabs.press", {
           tabId: args.tabId,
           key: args.key,
         });
       case "evaluate":
-        return await this.broker.request("tabs.evaluate", {
+        return await this.req("tabs.evaluate", {
           tabId: args.tabId,
           function: args.function,
         });
       case "page_info":
-        return await this.broker.request("tabs.pageInfo", { tabId: args.tabId });
+        return await this.req("tabs.pageInfo", { tabId: args.tabId });
       case "fetch_json":
-        return await this.broker.request("tabs.fetchJson", {
+        return await this.req("tabs.fetchJson", {
           tabId: args.tabId,
           url: args.url,
           method: args.method,
@@ -557,17 +585,17 @@ class BrowserControlServer {
       case "run_parallel":
         return await this.runParallel(args.ops || []);
       case "audit_log": {
-        const ext = await this.broker.request("audit.get").catch(() => ({ entries: [] }));
+        const ext = await this.req("audit.get").catch(() => ({ entries: [] }));
         return { broker: this.broker.audit, extension: ext.entries || [] };
       }
       case "console":
-        return await this.broker.request("diagnostics.console", {
+        return await this.req("diagnostics.console", {
           tabId: args.tabId,
           level: args.level,
           limit: args.limit,
         });
       case "network":
-        return await this.broker.request("diagnostics.network", {
+        return await this.req("diagnostics.network", {
           tabId: args.tabId,
           failedOnly: args.failedOnly,
           limit: args.limit,
@@ -575,21 +603,21 @@ class BrowserControlServer {
           includePreserved: args.includePreserved,
         });
       case "get_console_message":
-        return await this.broker.request("diagnostics.consoleGet", {
+        return await this.req("diagnostics.consoleGet", {
           tabId: args.tabId,
           msgid: args.msgid,
         });
       case "get_network_request":
-        return await this.broker.request("diagnostics.networkGet", {
+        return await this.req("diagnostics.networkGet", {
           tabId: args.tabId,
           reqid: args.reqid,
         });
       case "wait_for":
-        return await this.broker.request("tabs.wait", args);
+        return await this.req("tabs.wait", args);
       case "performance":
-        return await this.broker.request("tabs.performance", { tabId: args.tabId });
+        return await this.req("tabs.performance", { tabId: args.tabId });
       case "css_styles":
-        return await this.broker.request("tabs.css", {
+        return await this.req("tabs.css", {
           tabId: args.tabId,
           uid: args.uid,
         });
@@ -599,7 +627,7 @@ class BrowserControlServer {
   }
 
   async saveScreenshot(tabId, fileName, wait) {
-    const shot = await this.broker.request("tabs.screenshot", { tabId, wait });
+    const shot = await this.req("tabs.screenshot", { tabId, wait });
     const name = fileName || `tab-${tabId}.png`;
     const filePath = path.join(ARTIFACTS_DIR, name);
     fs.mkdirSync(ARTIFACTS_DIR, { recursive: true });
@@ -670,7 +698,7 @@ async function main() {
           result: {
             protocolVersion: (params && params.protocolVersion) || "2024-11-05",
             capabilities: { tools: {} },
-            serverInfo: { name: "grok-browser-use", version: "0.6.6" },
+            serverInfo: { name: "grok-browser-use", version: "0.6.7" },
           },
         });
         return;

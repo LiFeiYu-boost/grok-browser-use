@@ -106,12 +106,12 @@ async function proveDaemonAndMcp() {
     const init = {
       protocolVersion: "2024-11-05",
       capabilities: {},
-      clientInfo: { name: "prove-singleton", version: "0.6.6" },
+      clientInfo: { name: "prove-singleton", version: "0.6.7" },
     };
     const i1 = await mcp1.request("initialize", init);
     const i2 = await mcp2.request("initialize", init);
-    assert.equal(i1.serverInfo.version, "0.6.6");
-    assert.equal(i2.serverInfo.version, "0.6.6");
+    assert.equal(i1.serverInfo.version, "0.6.7");
+    assert.equal(i2.serverInfo.version, "0.6.7");
     mcp1.notify("notifications/initialized");
     mcp2.notify("notifications/initialized");
     await sleep(400);

@@ -16,19 +16,19 @@ Use MCP tools on server `grok-browser-use` (some installs still expose `grok-bro
 
 ## Rules
 
-- New tabs go in the **Grok Browser** tab group. Do not dump them into the user's existing tabs.
+- New tabs go in this session's `Grok Browser · <short-id>` tab group (from `GROK_SESSION_ID`). Do not dump them into the user's existing tabs or another Grok session's group.
 - A visible comet pointer on agent pages is expected.
 - Default `new_tab` is visible (`show` omitted). Use `show: false` only when the user must not be interrupted.
 - Never drag, resize, or steal OS-window focus.
 - Click/fill only with uids from the latest `snapshot` of that tab. For compose dialogs (X/Twitter `发帖`), prefer the uid with `inDialog: true` / `testId: tweetButton`, not the sidebar button.
 - Do not click logout / 退出登录 / delete / 解除连接 unless the user asked. Snapshot marks these `destructive`; click refuses them without `confirmDestructive: true`.
-- Do not close or navigate the user's existing tabs unless they asked.
+- Do not close or navigate the user's existing tabs unless they asked. Do not click/close tabs in another Grok session's group.
 - Prefer a scratch tab, then close it.
 - Never attach `chrome.debugger` or inject MAIN-world `fetch`/`XHR` hooks on `tiktok.com` / `tiktokshop.com` / `bytedance.com` (Partner Center and SSO detect them and go white or swallow Log in). Click/fill/screenshot stay on `chrome.scripting`. Do not call `evaluate` there (extension CSP blocks `new Function`); use `page_info` and `fetch_json`. If a Partner tab is already blank, `debugger_detach_all` then let the **user** refresh. Do not `location.href` the user's logged-in Partner tab.
 
 ## Flow
 
-1. `status` — confirm `connected` (or `connectionState`) and `mode=daily`. Daily Chrome uses one shared broker for every Grok session; do not spawn extra MCP processes against `broker.sock`. If disconnected, retry; do not skip acceptance.
+1. `status` — confirm `connected` (or `connectionState`), `mode=daily`, and `tabGroup` for this session. Daily Chrome uses one shared broker; each session has its own tab group. `list_tabs` defaults to this group (`scope: "all"` to see other Grok groups, never the user's own tabs). If disconnected, retry; do not skip acceptance.
 2. `new_tab` with the target URL (CDP is attached before navigate; network idle is waited by default).
 3. `snapshot` to get uids (role / name / destructive / iframe frames).
 4. `click` / `fill` / `hover` / `scroll` / `select_option` / `press` / `evaluate`.
