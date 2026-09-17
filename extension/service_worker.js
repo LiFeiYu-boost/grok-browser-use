@@ -375,7 +375,7 @@ function snapshotInFrame() {
   const DESTRUCTIVE =
     /(log\s*out|sign\s*out|signout|退出登录|注销|delete account|删除账号|删除账户|断开连接|解除连接|解除绑定|\bdisconnect\b)/i;
   const sel =
-    'a, button, input, textarea, select, option, summary, [role], [onclick], [tabindex]:not([tabindex="-1"]), [contenteditable="true"]';
+    'a, button, input, textarea, select, option, summary, label, [role], [onclick], [tabindex]:not([tabindex="-1"]), [contenteditable="true"]';
   const implicitRole = (el) => {
     const role = el.getAttribute("role");
     if (role) return role;
@@ -419,27 +419,52 @@ function snapshotInFrame() {
       ""
     );
   };
+  const visibleBox = (el) => {
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    const st = getComputedStyle(el);
+    if (st.visibility === "hidden" || st.display === "none") return null;
+    if (r.width <= 0 || r.height <= 0) return null;
+    return r;
+  };
   const nodes = [];
   const seen = new Set();
   for (const el of document.querySelectorAll(sel)) {
     if (seen.has(el)) continue;
-    seen.add(el);
     if (el.closest("script, style, noscript")) continue;
-    const r = el.getBoundingClientRect();
     const tag = el.tagName.toLowerCase();
+    const type = (el.type || "").toLowerCase();
+    let boxEl = el;
+    let roleEl = el;
+    let r = visibleBox(el);
+    if (tag === "label") {
+      const input = el.querySelector('input[type="checkbox"], input[type="radio"]');
+      if (!input) continue;
+      seen.add(el);
+      seen.add(input);
+      boxEl = el;
+      roleEl = input;
+      r = visibleBox(el) || visibleBox(el.querySelector(".arco-checkbox-mask, span")) || visibleBox(input);
+    } else if (tag === "input" && (type === "checkbox" || type === "radio")) {
+      const lab = el.closest("label") || (el.labels && el.labels[0]) || el.parentElement;
+      r = visibleBox(el) || visibleBox(lab);
+      boxEl = visibleBox(el) ? el : lab || el;
+      roleEl = el;
+      if (lab) seen.add(lab);
+    }
+    seen.add(el);
     const isOption = tag === "option";
-    const st = getComputedStyle(el);
-    if (!isOption && (r.width <= 0 || r.height <= 0)) continue;
-    if (st.visibility === "hidden" || st.display === "none") continue;
+    if (!isOption && !r) continue;
+    if (!r) r = el.getBoundingClientRect();
     if (el.getAttribute("aria-hidden") === "true") continue;
-    const name = String(accessibleName(el) || "").trim();
+    const name = String(accessibleName(boxEl) || accessibleName(roleEl) || accessibleName(el) || "").trim();
     const href = el.href || el.getAttribute("href") || "";
     const destructive =
       DESTRUCTIVE.test(`${name} ${href}`) || /^(删除|delete)$/i.test(name);
     const uid = "e" + (nodes.length + 1);
-    el.setAttribute("data-gbc-uid", uid);
-    if (destructive) el.setAttribute("data-gbc-destructive", "1");
-    else el.removeAttribute("data-gbc-destructive");
+    boxEl.setAttribute("data-gbc-uid", uid);
+    if (destructive) boxEl.setAttribute("data-gbc-destructive", "1");
+    else boxEl.removeAttribute("data-gbc-destructive");
     let x = r.left + r.width / 2;
     let y = r.top + r.height / 2;
     try {
@@ -457,13 +482,13 @@ function snapshotInFrame() {
     }
     nodes.push({
       uid,
-      tag,
-      role: implicitRole(el),
+      tag: roleEl.tagName.toLowerCase(),
+      role: implicitRole(roleEl),
       name,
       label: name,
-      type: el.type || undefined,
-      id: el.id || undefined,
-      disabled: Boolean(el.disabled) || el.getAttribute("aria-disabled") === "true",
+      type: roleEl.type || undefined,
+      id: roleEl.id || el.id || undefined,
+      disabled: Boolean(roleEl.disabled) || roleEl.getAttribute("aria-disabled") === "true",
       destructive,
       inDialog: Boolean(
         el.closest('[role="dialog"], [aria-modal="true"], [data-testid="twc-dialog"]')
@@ -474,7 +499,12 @@ function snapshotInFrame() {
         r.right > 0 &&
         r.top < (window.innerHeight || 0) &&
         r.left < (window.innerWidth || 0),
-      value: "value" in el ? String(el.value || "").slice(0, 80) : undefined,
+      value:
+        "checked" in roleEl
+          ? String(Boolean(roleEl.checked))
+          : "value" in roleEl
+            ? String(roleEl.value || "").slice(0, 80)
+            : undefined,
       href: href ? String(href).slice(0, 200) : undefined,
       x: Math.round(x),
       y: Math.round(y),
@@ -567,18 +597,22 @@ async function locateUid(tabId, uid) {
       const r = el.getBoundingClientRect();
       let x = r.left + r.width / 2;
       let y = r.top + r.height / 2;
+      let crossOrigin = false;
       try {
         let win = window;
         while (win !== win.top) {
           const frame = win.frameElement;
-          if (!frame) break;
+          if (!frame) {
+            crossOrigin = true;
+            break;
+          }
           const fr = frame.getBoundingClientRect();
           x += fr.left;
           y += fr.top;
           win = win.parent;
         }
       } catch {
-        // cross-origin parent
+        crossOrigin = true;
       }
       const name =
         el.getAttribute("aria-label") ||
@@ -591,6 +625,7 @@ async function locateUid(tabId, uid) {
         name,
         destructive: el.getAttribute("data-gbc-destructive") === "1",
         disabled: Boolean(el.disabled),
+        crossOrigin,
         x,
         y,
         w: r.width,
@@ -736,9 +771,14 @@ async function click(tabId, uid, params = {}) {
   refuseDestructive(loc, params.confirmDestructive);
   await movePointerTo(tabId, loc.x, loc.y, true);
   const deny = await tabCdpDenied(tabId);
-  let via = deny ? "dom" : "cdp";
+  const skipCdp =
+    deny ||
+    loc.crossOrigin ||
+    loc.tag === "label" ||
+    loc.tag === "input";
+  let via = skipCdp ? "dom" : "cdp";
   try {
-    if (deny) throw new Error("cdp denied");
+    if (skipCdp) throw new Error("cdp skipped");
     await cdpClick(tabId, loc.x, loc.y);
   } catch {
     via = "dom";
@@ -837,11 +877,11 @@ async function hover(tabId, uid) {
   if (!loc.ok) throw new Error(loc.error || "uid not found");
   await movePointerTo(tabId, loc.x, loc.y, false);
   try {
-    if (await tabCdpDenied(tabId)) throw new Error("cdp denied");
+    if ((await tabCdpDenied(tabId)) || loc.crossOrigin) throw new Error("cdp skipped");
     await cdpHover(tabId, loc.x, loc.y);
   } catch {
     await chrome.scripting.executeScript({
-      target: { tabId, frameIds: loc.frameId != null ? [loc.frameId] : undefined },
+      target: { tabId, allFrames: true },
       func: (targetUid) => {
         const el = document.querySelector(`[data-gbc-uid="${targetUid}"]`);
         if (!el) return;
@@ -910,16 +950,29 @@ async function selectOption(tabId, uid, value) {
 }
 
 async function press(tabId, key) {
+  const injections = await chrome.scripting.executeScript({
+    target: { tabId, allFrames: true },
+    func: (k) => {
+      const el = document.activeElement;
+      if (!el || el === document.body) return null;
+      el.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true }));
+      el.dispatchEvent(new KeyboardEvent("keyup", { key: k, bubbles: true }));
+      if (k === "Enter" && (el.tagName === "INPUT" || el.tagName === "TEXTAREA")) {
+        const form = el.form;
+        if (form) form.requestSubmit ? form.requestSubmit() : form.submit();
+      }
+      return { ok: true, tag: el.tagName.toLowerCase() };
+    },
+    args: [key],
+  });
+  const hit = (injections || []).find((inj) => inj.result && inj.result.ok);
+  if (hit) return hit.result;
   const [{ result }] = await chrome.scripting.executeScript({
     target: { tabId },
     func: (k) => {
       const el = document.activeElement || document.body;
       el.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true }));
       el.dispatchEvent(new KeyboardEvent("keyup", { key: k, bubbles: true }));
-      if (k === "Enter" && el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA")) {
-        const form = el.form;
-        if (form) form.requestSubmit ? form.requestSubmit() : form.submit();
-      }
       return { ok: true };
     },
     args: [key],

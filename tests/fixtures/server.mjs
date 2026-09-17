@@ -37,7 +37,30 @@ function detailPage(id) {
 }
 
 export function startFixtureServer() {
-  const server = http.createServer(async (req, res) => {
+  return new Promise((resolve) => {
+    const frameServer = http.createServer((req, res) => {
+      const url = new URL(req.url, "http://127.0.0.1");
+      res.setHeader("Content-Type", "text/html; charset=utf-8");
+      if (url.pathname === "/xframe") {
+        res.end(`<!doctype html>
+<meta charset="utf-8">
+<title>ChatKit fake</title>
+<button id="xsend">Send message</button>
+<p id="xstatus">draft</p>
+<script>
+document.getElementById("xsend").onclick = () => {
+  document.getElementById("xstatus").textContent = "sent";
+  parent.postMessage({ gbc: "sent" }, "*");
+};
+</script>`);
+        return;
+      }
+      res.statusCode = 404;
+      res.end("not found");
+    });
+    frameServer.listen(0, "127.0.0.1", () => {
+      const frameOrigin = `http://127.0.0.1:${frameServer.address().port}`;
+      const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, "http://127.0.0.1");
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     if (url.pathname === "/form") {
@@ -104,6 +127,12 @@ document.getElementById("inner").onclick = () => {
   <div id="menu-pop" hidden>Hovered</div>
 </div>
 <iframe id="kid" src="/kitchen-frame" style="width:240px;height:80px;border:1px solid #ccc"></iframe>
+<iframe id="xkit" src="${frameOrigin}/xframe" style="width:400px;height:120px;border:1px solid #ccc"></iframe>
+<label class="arco-checkbox" id="row-check-wrap" style="display:flex;align-items:center;gap:8px;margin:12px 0">
+  <input id="row-check" type="checkbox" style="display:none">
+  <span class="arco-checkbox-mask" style="display:inline-block;width:16px;height:16px;border:1px solid #333"></span>
+  Select row
+</label>
 <div id="editor" role="textbox" contenteditable="true" style="border:1px solid #ccc;min-height:4em;padding:8px"></div>
 <p id="status">idle</p>
 <p id="pad" style="height:1200px">scroll pad</p>
@@ -126,6 +155,12 @@ menu.addEventListener("mouseenter", () => {
   status.textContent = "hovered";
 });
 document.getElementById("bottom").onclick = () => { status.textContent = "bottom"; };
+document.getElementById("row-check").onchange = () => {
+  status.textContent = document.getElementById("row-check").checked ? "checked" : "unchecked";
+};
+window.addEventListener("message", (e) => {
+  if (e.data && e.data.gbc === "sent") status.textContent = "iframe-sent";
+});
 </script>`);
       return;
     }
@@ -153,16 +188,21 @@ fetch("/form").then(() => {
     }
     res.statusCode = 404;
     res.end("not found");
-  });
-  return new Promise((resolve) => {
-    server.listen(0, "127.0.0.1", () => {
-      const { port } = server.address();
-      resolve({
-        server,
-        port,
-        origin: `http://127.0.0.1:${port}`,
-        close: () =>
-          new Promise((r) => server.close(() => r())),
+      });
+      server.listen(0, "127.0.0.1", () => {
+        const { port } = server.address();
+        resolve({
+          server,
+          frameServer,
+          port,
+          origin: `http://127.0.0.1:${port}`,
+          frameOrigin,
+          close: () =>
+            Promise.all([
+              new Promise((r) => server.close(() => r())),
+              new Promise((r) => frameServer.close(() => r())),
+            ]),
+        });
       });
     });
   });

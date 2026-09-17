@@ -8,6 +8,7 @@ import {
   DEFAULT_DAILY_SOCKET_PATH,
   ensureRunDir,
   writeRuntimeConfig,
+  linkDailyBrokerAlias,
 } from "../lib/paths.mjs";
 
 function log(line) {
@@ -31,6 +32,11 @@ async function main() {
   const manageHost = socketPath === DEFAULT_DAILY_SOCKET_PATH;
   if (manageHost) {
     writeRuntimeConfig({ socketPath, mode: "daily", target: "daily", daemon: true });
+    try {
+      linkDailyBrokerAlias();
+    } catch {
+      // ignore
+    }
   }
   const broker = new Broker({ socketPath });
   try {

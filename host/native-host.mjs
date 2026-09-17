@@ -50,36 +50,41 @@ function connectSocket(socketPath) {
   });
 }
 
-async function connectSocketRetry(socketPath, timeoutMs = 90000) {
+async function connectSocketRetry(socketPaths, timeoutMs = 90000) {
   const started = Date.now();
   let lastErr;
   let attempt = 0;
+  const paths = [...new Set(socketPaths.filter(Boolean))];
   while (Date.now() - started < timeoutMs) {
     attempt += 1;
-    try {
-      return await connectSocket(socketPath);
-    } catch (err) {
-      lastErr = err;
-      if (attempt === 1 || attempt % 8 === 0) {
-        log({
-          event: "socket-wait",
-          socketPath,
-          attempt,
-          error: String(err && err.message ? err.message : err),
-        });
+    for (const socketPath of paths) {
+      try {
+        return await connectSocket(socketPath);
+      } catch (err) {
+        lastErr = err;
+        if (attempt === 1 || attempt % 8 === 0) {
+          log({
+            event: "socket-wait",
+            socketPath,
+            attempt,
+            error: String(err && err.message ? err.message : err),
+          });
+        }
       }
-      await new Promise((r) => setTimeout(r, 250));
     }
+    await new Promise((r) => setTimeout(r, 250));
   }
-  throw lastErr || new Error("broker socket never appeared: " + socketPath);
+  throw lastErr || new Error("broker socket never appeared: " + paths.join(","));
 }
 
 async function main() {
   const config = loadConfig();
   const socketPath = process.env.GROK_BROWSER_SOCKET || config.socketPath;
   if (!socketPath) throw new Error("no socketPath (set GROK_BROWSER_SOCKET or run/config.json)");
+  const dailySock = path.join(pluginRoot, "run", "daily.sock");
+  const paths = process.env.GROK_BROWSER_SOCKET ? [socketPath] : [socketPath, dailySock];
   log({ event: "start", socketPath, envSocket: Boolean(process.env.GROK_BROWSER_SOCKET), ppid: process.ppid });
-  const sock = await connectSocketRetry(socketPath);
+  const sock = await connectSocketRetry(paths);
   log({ event: "socket-connected" });
 
   let socketBuf = "";

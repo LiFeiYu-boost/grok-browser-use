@@ -378,6 +378,16 @@ class BrowserControlServer {
   async ensureConnected(timeoutMs) {
     if (this.brokerConnected()) return;
     const waitMs = timeoutMs || (this.mode === "daily" ? 45000 : 15000);
+    if (this.mode === "daily" && this.sharedDaily) {
+      const sock = this.broker && this.broker.sock;
+      if (!this.broker || !sock || sock.destroyed) {
+        const isolated = Boolean(process.env.GROK_BROWSER_DAILY_SOCKET);
+        this.broker = await ensureDailyBroker({
+          installHost: !isolated,
+          nudgeNativeHost: !isolated,
+        });
+      }
+    }
     try {
       await this.broker.waitReady(waitMs);
     } catch (err) {
@@ -386,6 +396,31 @@ class BrowserControlServer {
           String(err && err.message ? err.message : err)
       );
     }
+  }
+
+  statusPayload() {
+    const connected = this.brokerConnected();
+    if (this.started) {
+      this.started = {
+        ...this.started,
+        connected,
+        connecting: connected ? false : Boolean(this.started.connecting),
+      };
+    }
+    return {
+      connected,
+      connectionState: this.connectionState(),
+      mode: this.mode,
+      extensionId: EXTENSION_ID,
+      pid: this.launched && this.launched.pid,
+      hubPid: this.broker && this.broker.hubPid,
+      sharedBroker: this.sharedDaily,
+      ...this.sessionMeta(),
+      started: this.started,
+      hint: connected
+        ? undefined
+        : "Open Google Chrome with the unpacked grok-browser-use extension. Native host com.xai.grok.browser must be installed.",
+    };
   }
 
   async startBrowser() {
@@ -481,28 +516,34 @@ class BrowserControlServer {
     if (FORBIDDEN_KEYS.includes(name)) {
       throw new Error(`${name} is not available; window focus/drag is forbidden`);
     }
-    if (args.show === true) {
+    if (args.show === true && this.broker) {
       this.broker.recordAudit("show", { tool: name, args });
     }
-    if (name !== "status") {
+    if (name === "status") return this.statusPayload();
+    const run = async () => {
       await this.ensureConnected();
+      return await this.dispatchTool(name, args);
+    };
+    try {
+      return await run();
+    } catch (err) {
+      const msg = String(err && err.message ? err.message : err);
+      if (
+        this.mode !== "daily" ||
+        !/not connected|native port did not connect|broker socket closed|extension is not connected/i.test(
+          msg
+        )
+      ) {
+        throw err;
+      }
+      return await run();
     }
+  }
+
+  async dispatchTool(name, args = {}) {
     switch (name) {
       case "status":
-        return {
-          connected: this.brokerConnected(),
-          connectionState: this.connectionState(),
-          mode: this.mode,
-          extensionId: EXTENSION_ID,
-          pid: this.launched && this.launched.pid,
-          hubPid: this.broker && this.broker.hubPid,
-          sharedBroker: this.sharedDaily,
-          ...this.sessionMeta(),
-          started: this.started,
-          hint: this.brokerConnected()
-            ? undefined
-            : "Open Google Chrome with the unpacked grok-browser-use extension. Native host com.xai.grok.browser must be installed.",
-        };
+        return this.statusPayload();
       case "debugger_detach_all":
         return await this.req("debugger.detachAll");
       case "probes_unregister":
@@ -698,7 +739,7 @@ async function main() {
           result: {
             protocolVersion: (params && params.protocolVersion) || "2024-11-05",
             capabilities: { tools: {} },
-            serverInfo: { name: "grok-browser-use", version: "0.6.7" },
+            serverInfo: { name: "grok-browser-use", version: "0.6.8" },
           },
         });
         return;
