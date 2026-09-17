@@ -24,7 +24,7 @@ Use MCP tools on server `grok-browser-use` (some installs still expose `grok-bro
 - Do not click logout / 退出登录 / delete / 解除连接 unless the user asked. Snapshot marks these `destructive`; click refuses them without `confirmDestructive: true`.
 - Do not close or navigate the user's existing tabs unless they asked.
 - Prefer a scratch tab, then close it.
-- Never attach `chrome.debugger` or inject MAIN-world `fetch`/`XHR` hooks on `tiktok.com` / `tiktokshop.com` / `bytedance.com` (Partner Center and SSO detect them and go white or swallow Log in). Click/fill/evaluate there stay on `chrome.scripting`. If a Partner tab is already blank, `debugger_detach_all` then let the **user** refresh. Do not `location.href` the user's logged-in Partner tab.
+- Never attach `chrome.debugger` or inject MAIN-world `fetch`/`XHR` hooks on `tiktok.com` / `tiktokshop.com` / `bytedance.com` (Partner Center and SSO detect them and go white or swallow Log in). Click/fill/screenshot stay on `chrome.scripting`. Do not call `evaluate` there (extension CSP blocks `new Function`); use `page_info` and `fetch_json`. If a Partner tab is already blank, `debugger_detach_all` then let the **user** refresh. Do not `location.href` the user's logged-in Partner tab.
 
 ## Flow
 

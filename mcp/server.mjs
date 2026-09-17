@@ -162,11 +162,40 @@ const TOOLS = [
   },
   {
     name: "evaluate",
-    description: "Run a JS function source in the tab, e.g. () => document.title",
+    description:
+      "Run a JS function source in the tab, e.g. () => document.title. Not available on tiktok.com / tiktokshop.com (use page_info / fetch_json).",
     inputSchema: {
       type: "object",
       properties: { tabId: { type: "number" }, function: { type: "string" } },
       required: ["tabId", "function"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "page_info",
+    description:
+      "DOM-safe page summary without eval or chrome.debugger: href, title, text excerpt, cookie names, /api/ resource URLs.",
+    inputSchema: {
+      type: "object",
+      properties: { tabId: { type: "number" } },
+      required: ["tabId"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "fetch_json",
+    description:
+      "Same-origin fetch() with credentials from the tab, no eval and no debugger. Use on Partner Center / SSO.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tabId: { type: "number" },
+        url: { type: "string" },
+        method: { type: "string" },
+        headers: { type: "object" },
+        body: {},
+      },
+      required: ["tabId", "url"],
       additionalProperties: false,
     },
   },
@@ -503,6 +532,16 @@ class BrowserControlServer {
           tabId: args.tabId,
           function: args.function,
         });
+      case "page_info":
+        return await this.broker.request("tabs.pageInfo", { tabId: args.tabId });
+      case "fetch_json":
+        return await this.broker.request("tabs.fetchJson", {
+          tabId: args.tabId,
+          url: args.url,
+          method: args.method,
+          headers: args.headers,
+          body: args.body,
+        });
       case "screenshot":
         return await this.saveScreenshot(args.tabId, args.fileName, args.wait);
       case "run_parallel":
@@ -611,7 +650,7 @@ async function main() {
           result: {
             protocolVersion: "2024-11-05",
             capabilities: { tools: {} },
-            serverInfo: { name: "grok-browser-use", version: "0.6.3" },
+            serverInfo: { name: "grok-browser-use", version: "0.6.4" },
           },
         });
         return;

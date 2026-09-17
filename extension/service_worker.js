@@ -145,6 +145,10 @@ async function dispatch(method, params) {
       return await selectOption(params.tabId, params.uid, params.value || params.label);
     case "tabs.evaluate":
       return await evaluate(params.tabId, params.function);
+    case "tabs.pageInfo":
+      return await pageInfo(params.tabId);
+    case "tabs.fetchJson":
+      return await fetchJson(params.tabId, params);
     case "tabs.screenshot":
       return await screenshot(params.tabId, params);
     case "tabs.hasPointer":
@@ -256,7 +260,7 @@ async function createTab(params) {
   const skipDebugger = cdpDeniedUrl(dest);
   if (!skipDebugger) await attachCdp(tab.id).catch(() => {});
   await chrome.tabs.update(tab.id, { url: params.url });
-  await waitComplete(tab.id);
+  if (!skipDebugger) await waitComplete(tab.id);
   const loadedUrl = (await chrome.tabs.get(tab.id).catch(() => tab)).url || dest;
   if (cdpDeniedUrl(loadedUrl)) detachCdp(tab.id);
   if (params.wait !== false && !cdpDeniedUrl(loadedUrl)) {
@@ -884,18 +888,72 @@ async function waitFor(params) {
   throw new Error("wait_for needs networkIdle, consolePattern, selector, or uid");
 }
 
+async function pageInfo(tabId) {
+  const injections = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: () => ({
+      href: location.href,
+      title: document.title,
+      text: (document.body && document.body.innerText ? document.body.innerText : "").slice(0, 2000),
+      cookieNames: document.cookie.split(";").map((c) => c.trim().split("=")[0]).filter(Boolean),
+      apiResources: (() => {
+        const names = performance.getEntriesByType("resource").map((e) => e.name);
+        const apis = names.filter((u) => u.includes("/api/"));
+        const list = apis.filter((u) => u.includes("/sample/records/list") || u.includes("/sample/budget/review"));
+        const paths = [...new Set(apis.map((u) => u.split("?")[0]))];
+        return { names: apis.slice(-40), paths, listUrls: list.slice(-6) };
+      })(),
+      scripts: Array.from(document.scripts)
+        .map((s) => s.src)
+        .filter(Boolean)
+        .slice(0, 40),
+    }),
+  });
+  return {
+    value: injections && injections[0] ? injections[0].result : null,
+    via: "scripting",
+  };
+}
+
+async function fetchJson(tabId, params = {}) {
+  const injections = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: async (url, method, headers, body) => {
+      const res = await fetch(url, {
+        method: method || "GET",
+        credentials: "include",
+        headers: headers || {},
+        body: body == null ? undefined : typeof body === "string" ? body : JSON.stringify(body),
+      });
+      let json = null;
+      try {
+        json = await res.json();
+      } catch (err) {
+        json = { parseError: String(err && err.message ? err.message : err) };
+      }
+      return { status: res.status, url: res.url, json };
+    },
+    args: [
+      params.url,
+      params.method || "GET",
+      params.headers || { "content-type": "application/json" },
+      params.body == null ? null : params.body,
+    ],
+  });
+  if (injections && injections[0] && injections[0].error) {
+    throw new Error(String(injections[0].error.message || injections[0].error));
+  }
+  return {
+    value: injections && injections[0] ? injections[0].result : null,
+    via: "scripting",
+  };
+}
+
 async function evaluate(tabId, fnSource) {
   if (await tabCdpDenied(tabId)) {
-    const injections = await chrome.scripting.executeScript({
-      target: { tabId },
-      func: (src) => new Function(`return (${src})()`)(),
-      args: [fnSource],
-    });
-    return {
-      value: injections && injections[0] ? injections[0].result : null,
-      via: "scripting",
-      cdpDenied: true,
-    };
+    throw new Error(
+      "evaluate cannot compile arbitrary JS on this origin (extension CSP blocks new Function, and MAIN-world eval trips anti-bot). Use page_info or fetch_json."
+    );
   }
   const target = await attachCdp(tabId);
   const expression = `(${fnSource})()`;
