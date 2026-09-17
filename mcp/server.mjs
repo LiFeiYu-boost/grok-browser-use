@@ -8,7 +8,7 @@ import {
   pauseDailyNativeHost,
   restoreDailyNativeHost,
 } from "../lib/install-host-manifest.mjs";
-import { encodeLspMessage, createLspDecoder } from "../lib/native-framing.mjs";
+import { McpStdio } from "../lib/native-framing.mjs";
 import {
   MODE_PATH,
   ARTIFACTS_DIR,
@@ -633,14 +633,24 @@ function errorResult(message) {
 
 async function main() {
   const server = new BrowserControlServer();
-  let starting = server.startBrowser();
+  const stdio = new McpStdio();
+  let starting = null;
 
   const write = (msg) => {
-    process.stdout.write(encodeLspMessage(msg));
+    process.stdout.write(stdio.encode(msg));
+  };
+
+  const ensureBrowser = () => {
+    if (!starting) {
+      starting = server.startBrowser().catch((err) => {
+        process.stderr.write(`browser start failed: ${err}\n`);
+      });
+    }
+    return starting;
   };
 
   const handle = async (msg) => {
-    if (!msg || msg.method == null) return;
+    if (!msg || (msg.method == null && msg.id == null)) return;
     const { id, method, params } = msg;
     try {
       if (method === "initialize") {
@@ -648,17 +658,15 @@ async function main() {
           jsonrpc: "2.0",
           id,
           result: {
-            protocolVersion: "2024-11-05",
+            protocolVersion: (params && params.protocolVersion) || "2024-11-05",
             capabilities: { tools: {} },
-            serverInfo: { name: "grok-browser-use", version: "0.6.4" },
+            serverInfo: { name: "grok-browser-use", version: "0.6.5" },
           },
         });
         return;
       }
       if (method === "notifications/initialized") {
-        starting.catch((err) => {
-          process.stderr.write(`browser start background: ${err}\n`);
-        });
+        ensureBrowser();
         return;
       }
       if (method === "tools/list") {
@@ -666,7 +674,7 @@ async function main() {
         return;
       }
       if (method === "tools/call") {
-        await starting;
+        await ensureBrowser();
         const name = params.name;
         const args = params.arguments || {};
         const result = await server.callTool(name, args);
@@ -695,10 +703,17 @@ async function main() {
     }
   };
 
-  const decode = createLspDecoder((msg) => {
-    handle(msg);
+  process.stderr.write(`gbu-mcp pid=${process.pid} stdin ready\n`);
+  process.stdin.resume();
+  process.stdin.on("data", (chunk) => {
+    try {
+      stdio.feed(chunk, (msg) => {
+        handle(msg);
+      });
+    } catch (err) {
+      process.stderr.write(`gbu-mcp decode: ${err}\n`);
+    }
   });
-  process.stdin.on("data", decode);
   process.stdin.on("end", async () => {
     await server.shutdown();
     process.exit(0);
@@ -710,10 +725,6 @@ async function main() {
   process.on("SIGTERM", async () => {
     await server.shutdown();
     process.exit(0);
-  });
-
-  starting = starting.catch((err) => {
-    process.stderr.write(`browser start failed: ${err}\n`);
   });
 }
 

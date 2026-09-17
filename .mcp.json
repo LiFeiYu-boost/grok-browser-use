@@ -1,7 +1,10 @@
 {
   "mcpServers": {
     "grok-browser-use": {
-      "command": "${GROK_PLUGIN_ROOT}/scripts/run-mcp.sh"
+      "command": "${GROK_PLUGIN_ROOT}/scripts/run-mcp.sh",
+      "env": {
+        "GROK_BROWSER_TARGET": "daily"
+      }
     }
   }
 }
