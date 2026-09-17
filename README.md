@@ -28,13 +28,18 @@ Chrome 136+ ignores `--remote-debugging-port` on the default user-data-dir. [bro
 
 ```mermaid
 flowchart LR
-  G[Grok / MCP client] -->|stdio| M[mcp/server.mjs]
-  M -->|unix socket| H[native host]
+  G1[Grok session A] -->|stdio| M1[mcp/server.mjs]
+  G2[Grok session B] -->|stdio| M2[mcp/server.mjs]
+  M1 -->|client| HUB[shared daily broker]
+  M2 -->|client| HUB
+  HUB -->|unix socket| H[native host]
   H -->|native messaging| E[MV3 extension]
   E --> T[Grok Browser tab group]
   T --> C[Your daily Chrome]
   E -->|chrome.debugger| D[CDP Runtime + Network]
 ```
+
+Daily Chrome has **one broker per machine** (`run/daily.sock`). Every Grok session’s MCP process is a client of that hub. Chrome’s native host attaches to the hub, not to whichever MCP last started. CfT tests still use a per-pid socket.
 
 Control (groups, pointer, clicks) goes through the extension. Inspection uses the same `chrome.debugger` session in the background — it does not bring the Network panel to the front.
 
@@ -83,6 +88,7 @@ Collection is limited to the **Grok Browser** group. Your other tabs are left al
 
 ```bash
 node tests/test-framing.mjs
+node tests/prove-singleton-broker.mjs   # shared daily hub; does not touch Chrome
 node tests/spike-native-messaging.mjs   # Chrome for Testing; does not touch daily Chrome
 node tests/acceptance.mjs
 ```

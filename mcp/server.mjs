@@ -3,17 +3,13 @@ import fs from "node:fs";
 import path from "node:path";
 import { Broker } from "../lib/broker.mjs";
 import { launchCft, killCftTree, killLaunchedCft, writeCftHostWrapper } from "../lib/launch-cft.mjs";
-import {
-  installNativeHostManifest,
-  pauseDailyNativeHost,
-  restoreDailyNativeHost,
-} from "../lib/install-host-manifest.mjs";
+import { restoreDailyNativeHost } from "../lib/install-host-manifest.mjs";
 import { McpStdio } from "../lib/native-framing.mjs";
+import { ensureDailyBroker } from "../lib/broker-client.mjs";
 import {
   MODE_PATH,
   ARTIFACTS_DIR,
   RUN_DIR,
-  writeRuntimeConfig,
   EXTENSION_ID,
   ensureRunDir,
 } from "../lib/paths.mjs";
@@ -340,20 +336,27 @@ const FORBIDDEN_KEYS = ["bringToFront", "resize_page", "drag"];
 
 class BrowserControlServer {
   constructor() {
-    this.broker = new Broker();
+    this.broker = null;
     this.launched = null;
     this.mode = "daily";
     this.started = null;
     this.pausedDailyHost = null;
+    this.sharedDaily = false;
+  }
+
+  brokerConnected() {
+    if (!this.broker) return false;
+    if (typeof this.broker.active === "boolean") return this.broker.active;
+    return Boolean(this.broker.active && !this.broker.active.destroyed);
   }
 
   connectionState() {
-    if (this.broker.active && !this.broker.active.destroyed) return "connected";
+    if (this.brokerConnected()) return "connected";
     return this.started && this.started.connecting ? "connecting" : "disconnected";
   }
 
   async ensureConnected(timeoutMs) {
-    if (this.broker.active && !this.broker.active.destroyed) return;
+    if (this.brokerConnected()) return;
     const waitMs = timeoutMs || (this.mode === "daily" ? 45000 : 15000);
     try {
       await this.broker.waitReady(waitMs);
@@ -370,9 +373,12 @@ class BrowserControlServer {
     const target = process.env.GROK_BROWSER_TARGET || "daily";
     this.mode = target === "cft" ? "headless" : "daily";
     if (this.mode === "daily") {
-      writeRuntimeConfig({ mode: this.mode, target });
-      installNativeHostManifest(null, { dailyChrome: true });
-      await this.broker.start();
+      const isolated = Boolean(process.env.GROK_BROWSER_DAILY_SOCKET);
+      this.broker = await ensureDailyBroker({
+        installHost: !isolated,
+        nudgeNativeHost: !isolated,
+      });
+      this.sharedDaily = true;
     } else {
       const cftSock = path.join(RUN_DIR, `cft-${process.pid}.sock`);
       this.broker = new Broker({ socketPath: cftSock });
@@ -387,23 +393,25 @@ class BrowserControlServer {
     }
     if (this.mode === "daily") {
       this.started = {
-        pid: null,
+        pid: this.broker.hubPid || null,
         mode: this.mode,
         target: "daily",
-        connecting: true,
-        note: "lazy attach to daily Google Chrome; MCP stays up if the extension is asleep",
+        connecting: !this.brokerConnected(),
+        sharedBroker: true,
+        note: "shared daily broker; MCP stays up if the extension is asleep",
       };
       this.broker
         .waitReady(60000)
         .then((ready) => {
           this.started = {
             ready,
-            pid: null,
+            pid: this.broker.hubPid || null,
             mode: this.mode,
             target: "daily",
             connecting: false,
             connected: true,
-            note: "attached to daily Google Chrome; will not kill Chrome on shutdown",
+            sharedBroker: true,
+            note: "attached to daily Google Chrome via shared broker; will not kill Chrome on shutdown",
           };
         })
         .catch((err) => {
@@ -423,10 +431,11 @@ class BrowserControlServer {
 
   async shutdown() {
     try {
-      this.broker.close();
+      if (this.broker) this.broker.close();
     } catch {
       // ignore
     }
+    this.broker = null;
     if (this.mode === "daily") {
       this.launched = null;
       return;
@@ -461,16 +470,17 @@ class BrowserControlServer {
     switch (name) {
       case "status":
         return {
-          connected: Boolean(this.broker.active && !this.broker.active.destroyed),
+          connected: this.brokerConnected(),
           connectionState: this.connectionState(),
           mode: this.mode,
           extensionId: EXTENSION_ID,
           pid: this.launched && this.launched.pid,
+          hubPid: this.broker && this.broker.hubPid,
+          sharedBroker: this.sharedDaily,
           started: this.started,
-          hint:
-            this.broker.active && !this.broker.active.destroyed
-              ? undefined
-              : "Open Google Chrome with the unpacked grok-browser-use extension. Native host com.xai.grok.browser must be installed.",
+          hint: this.brokerConnected()
+            ? undefined
+            : "Open Google Chrome with the unpacked grok-browser-use extension. Native host com.xai.grok.browser must be installed.",
         };
       case "debugger_detach_all":
         return await this.broker.request("debugger.detachAll");
@@ -660,7 +670,7 @@ async function main() {
           result: {
             protocolVersion: (params && params.protocolVersion) || "2024-11-05",
             capabilities: { tools: {} },
-            serverInfo: { name: "grok-browser-use", version: "0.6.5" },
+            serverInfo: { name: "grok-browser-use", version: "0.6.6" },
           },
         });
         return;

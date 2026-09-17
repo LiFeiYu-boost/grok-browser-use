@@ -28,7 +28,7 @@ Use MCP tools on server `grok-browser-use` (some installs still expose `grok-bro
 
 ## Flow
 
-1. `status` — confirm `connected` (or `connectionState`) and `mode=daily`. If disconnected, retry; do not skip acceptance.
+1. `status` — confirm `connected` (or `connectionState`) and `mode=daily`. Daily Chrome uses one shared broker for every Grok session; do not spawn extra MCP processes against `broker.sock`. If disconnected, retry; do not skip acceptance.
 2. `new_tab` with the target URL (CDP is attached before navigate; network idle is waited by default).
 3. `snapshot` to get uids (role / name / destructive / iframe frames).
 4. `click` / `fill` / `hover` / `scroll` / `select_option` / `press` / `evaluate`.
@@ -40,7 +40,7 @@ Use MCP tools on server `grok-browser-use` (some installs still expose `grok-bro
 
 This plugin is used by Grok agents. If grok-browser-use is awkward, broken, or unsafe **in this session**, open an issue on https://github.com/LiFeiYu-boost/grok-browser-use **the same turn**. Do not wait for the user to ask.
 
-What counts: handshake / native-host / MCP dies; Chrome freeze or 100% CPU; wrong click; snapshot miss; fill/click fail on contenteditable; focus steal or touching non-Grok tabs; tests colliding with daily Chrome; having to tell the user to Reload the extension.
+What counts: handshake / native-host / MCP dies; Chrome freeze or 100% CPU; wrong click; snapshot miss; fill/click fail on contenteditable; focus steal or touching non-Grok tabs; tests colliding with daily Chrome; having to tell the user to Reload the extension; `status` stuck disconnected because another Grok session stole `broker.sock` / `daily.sock`.
 
 How:
 

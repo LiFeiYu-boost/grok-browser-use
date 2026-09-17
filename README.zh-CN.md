@@ -30,13 +30,18 @@ Chrome 136+ 默认用户目录不再接受 `--remote-debugging-port`。[browser-
 
 ```mermaid
 flowchart LR
-  G[Grok / MCP 客户端] -->|stdio| M[mcp/server.mjs]
-  M -->|unix socket| H[native host]
+  G1[Grok session A] -->|stdio| M1[mcp/server.mjs]
+  G2[Grok session B] -->|stdio| M2[mcp/server.mjs]
+  M1 -->|client| HUB[本机共享 daily broker]
+  M2 -->|client| HUB
+  HUB -->|unix socket| H[native host]
   H -->|native messaging| E[MV3 扩展]
   E --> T[Grok Browser 标签分组]
   T --> C[你的日常 Chrome]
   E -->|chrome.debugger| D[CDP Runtime + Network]
 ```
+
+日常 Chrome **整机只有一个 broker**（`run/daily.sock`）。每个 Grok session 的 MCP 都是这个 hub 的客户端。Chrome native host 接到 hub 上，而不是接到最后一个启动的 MCP。CfT 测试仍用按 pid 隔离的 socket。
 
 控制面（分组、指针、点击）走扩展。检查面用同一条 `chrome.debugger` 会话在后台读，不会把 Network 面板拉到前台。
 
