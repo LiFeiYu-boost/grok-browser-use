@@ -77,7 +77,7 @@ const TOOLS = [
   {
     name: "snapshot",
     description:
-      "Compact a11y snapshot (role/name/destructive/inViewport) with uids, including same-origin iframes. Does not activate the tab.",
+      "Compact a11y snapshot (role/name/destructive/inViewport) with uids, including same-origin iframes. Caps at 250 interactive nodes (in-viewport first) so large SPAs return instead of timing out. Does not activate the tab.",
     inputSchema: {
       type: "object",
       properties: { tabId: { type: "number" } },
@@ -300,9 +300,36 @@ const TOOLS = [
     },
   },
   {
+    name: "emulate",
+    description:
+      "Override the tab's CSS viewport via CDP Emulation.setDeviceMetricsOverride. Does not resize the Chrome OS window or steal focus. Use viewport \"390x844x3,mobile,touch\", preset \"iphone\", or \"reset\".",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tabId: { type: "number" },
+        viewport: {
+          type: "string",
+          description: '390x844x3,mobile,touch | iphone | iphone-se | pixel | reset',
+        },
+        width: { type: "number" },
+        height: { type: "number" },
+        deviceScaleFactor: { type: "number" },
+        mobile: { type: "boolean" },
+        touch: { type: "boolean" },
+        userAgent: { type: "boolean", description: "If true, set a mobile Safari UA" },
+        reload: {
+          type: "boolean",
+          description: "Default true. Reload so CSS media queries pick up the new viewport.",
+        },
+      },
+      required: ["tabId"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "wait_for",
     description:
-      "Wait without opening DevTools: network idle, a console pattern, or a selector/uid.",
+      "Wait without opening DevTools: network idle (stale in-flight requests ignored), a console pattern, or a selector/uid. Returns timedOut:true instead of hanging past 15s.",
     inputSchema: {
       type: "object",
       properties: {
@@ -371,8 +398,8 @@ class BrowserControlServer {
     return { sessionId, tabGroup: sessionGroupTitle(sessionId) };
   }
 
-  req(method, params = {}) {
-    return this.broker.request(method, withSession(params));
+  req(method, params = {}, timeoutMs) {
+    return this.broker.request(method, withSession(params), timeoutMs);
   }
 
   async ensureConnected(timeoutMs) {
@@ -566,7 +593,19 @@ class BrowserControlServer {
       case "close_tab":
         return await this.req("tabs.close", { tabId: args.tabId });
       case "snapshot":
-        return await this.req("tabs.snapshot", { tabId: args.tabId });
+        return await this.req("tabs.snapshot", { tabId: args.tabId }, 15000);
+      case "emulate":
+        return await this.req("tabs.emulate", {
+          tabId: args.tabId,
+          viewport: args.viewport,
+          width: args.width,
+          height: args.height,
+          deviceScaleFactor: args.deviceScaleFactor,
+          mobile: args.mobile,
+          touch: args.touch,
+          userAgent: args.userAgent,
+          reload: args.reload,
+        });
       case "click":
         return await this.req("tabs.click", {
           tabId: args.tabId,
@@ -653,8 +692,10 @@ class BrowserControlServer {
           tabId: args.tabId,
           reqid: args.reqid,
         });
-      case "wait_for":
-        return await this.req("tabs.wait", args);
+      case "wait_for": {
+        const timeoutMs = Math.min(Number(args.timeoutMs) || 8000, 15000);
+        return await this.req("tabs.wait", { ...args, timeoutMs }, timeoutMs + 2000);
+      }
       case "performance":
         return await this.req("tabs.performance", { tabId: args.tabId });
       case "css_styles":
@@ -739,7 +780,7 @@ async function main() {
           result: {
             protocolVersion: (params && params.protocolVersion) || "2024-11-05",
             capabilities: { tools: {} },
-            serverInfo: { name: "grok-browser-use", version: "0.6.8" },
+            serverInfo: { name: "grok-browser-use", version: "0.6.9" },
           },
         });
         return;

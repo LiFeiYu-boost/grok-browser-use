@@ -91,6 +91,7 @@ node tests/test-framing.mjs
 node tests/prove-singleton-broker.mjs   # shared daily hub; does not touch Chrome
 node tests/prove-session-groups.mjs     # per-session tab groups; does not touch Chrome
 node tests/prove-daily-socket.mjs       # daily.sock is the native-host path; broker.sock is an alias
+node tests/prove-viewport-snapshot.mjs  # emulate iphone popup + snapshot cap + wait_for does not hang
 node tests/spike-native-messaging.mjs   # Chrome for Testing; does not touch daily Chrome
 node tests/acceptance.mjs
 ```

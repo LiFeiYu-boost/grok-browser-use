@@ -11,6 +11,7 @@ function storeFor(tabId) {
       navs: [emptyNav()],
       byRequestId: new Map(),
       inFlight: new Set(),
+      inFlightAt: new Map(),
     });
   }
   return stores.get(tabId);
@@ -322,6 +323,8 @@ function onEvent(source, method, params) {
     };
     store.byRequestId.set(params.requestId, entry);
     store.inFlight.add(params.requestId);
+    if (!store.inFlightAt) store.inFlightAt = new Map();
+    store.inFlightAt.set(params.requestId, Date.now());
     pushLimited(nav.network, entry);
     return;
   }
@@ -346,6 +349,7 @@ function onEvent(source, method, params) {
   if (method === "Network.loadingFinished") {
     const entry = store.byRequestId.get(params.requestId);
     store.inFlight.delete(params.requestId);
+    store.inFlightAt && store.inFlightAt.delete(params.requestId);
     if (!entry) return;
     entry.encodedDataLength = params.encodedDataLength;
     if (entry.startTime != null && params.timestamp != null) {
@@ -357,6 +361,7 @@ function onEvent(source, method, params) {
   if (method === "Network.loadingFailed") {
     const entry = store.byRequestId.get(params.requestId);
     store.inFlight.delete(params.requestId);
+    store.inFlightAt && store.inFlightAt.delete(params.requestId);
     if (!entry) return;
     entry.failed = true;
     entry.errorText = params.errorText;
@@ -373,22 +378,44 @@ export function inFlightCount(tabId) {
   return store ? store.inFlight.size : 0;
 }
 
+function blockingInFlight(tabId, staleMs) {
+  const store = stores.get(tabId);
+  if (!store) return 0;
+  const now = Date.now();
+  let n = 0;
+  for (const id of store.inFlight) {
+    const started = store.inFlightAt && store.inFlightAt.get(id);
+    if (started == null || now - started < staleMs) n += 1;
+  }
+  return n;
+}
+
 export async function waitNetworkIdle(tabId, params = {}) {
   const idleMs = Number(params.idleMs) || 500;
-  const timeoutMs = Number(params.timeoutMs) || 15000;
+  const timeoutMs = Math.min(Math.max(Number(params.timeoutMs) || 8000, 500), 15000);
+  const staleMs = Number(params.staleMs) || 2500;
   const start = Date.now();
   let idleSince = Date.now();
   while (Date.now() - start < timeoutMs) {
-    if (inFlightCount(tabId) === 0) {
+    if (blockingInFlight(tabId, staleMs) === 0) {
       if (Date.now() - idleSince >= idleMs) {
-        return { ok: true, waitedMs: Date.now() - start };
+        return {
+          ok: true,
+          waitedMs: Date.now() - start,
+          inFlight: inFlightCount(tabId),
+        };
       }
     } else {
       idleSince = Date.now();
     }
     await sleep(50);
   }
-  throw new Error(`wait_for network idle timeout (${timeoutMs}ms), inFlight=${inFlightCount(tabId)}`);
+  return {
+    ok: false,
+    timedOut: true,
+    waitedMs: Date.now() - start,
+    inFlight: inFlightCount(tabId),
+  };
 }
 
 export async function waitConsole(tabId, params = {}) {
@@ -512,6 +539,212 @@ export async function cdpClick(tabId, x, y) {
   await dispatchMouse(tabId, { type: "mouseMoved", x, y });
   await dispatchMouse(tabId, { type: "mousePressed", x, y, button: "left", clickCount: 1 });
   await dispatchMouse(tabId, { type: "mouseReleased", x, y, button: "left", clickCount: 1 });
+}
+
+const IPHONE_UA =
+  "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1";
+const emulateOrigins = new Map();
+
+export function isEmulatedTab(tabId) {
+  return emulateOrigins.has(tabId);
+}
+
+export function parseViewport(spec) {
+  if (spec == null || spec === "") return { clear: true };
+  if (typeof spec === "object") return spec;
+  const raw = String(spec).trim().toLowerCase();
+  if (raw === "reset" || raw === "off" || raw === "desktop") return { clear: true };
+  const presets = {
+    iphone: { width: 390, height: 844, deviceScaleFactor: 3, mobile: true, touch: true },
+    "iphone-se": { width: 375, height: 667, deviceScaleFactor: 2, mobile: true, touch: true },
+    pixel: { width: 412, height: 915, deviceScaleFactor: 2.625, mobile: true, touch: true },
+  };
+  if (presets[raw]) return presets[raw];
+  const parts = raw.split(",");
+  const m = String(parts[0] || "").match(/^(\d+)\s*x\s*(\d+)(?:\s*x\s*([\d.]+))?$/);
+  if (!m) throw new Error('viewport must look like "390x844x3,mobile,touch" or "iphone" or "reset"');
+  const flags = new Set(parts.slice(1).map((s) => s.trim()).filter(Boolean));
+  return {
+    width: Number(m[1]),
+    height: Number(m[2]),
+    deviceScaleFactor: m[3] ? Number(m[3]) : 3,
+    mobile: flags.has("mobile") || flags.has("phone"),
+    touch: flags.has("touch") || flags.has("mobile") || flags.has("phone"),
+    userAgent: flags.has("ua") || flags.has("useragent") ? IPHONE_UA : undefined,
+  };
+}
+
+export async function emulateDevice(tabId, spec) {
+  const parsed = parseViewport(spec && spec.viewport != null ? spec.viewport : spec);
+  await chrome.tabs.update(tabId, { active: true }).catch(() => {});
+  const target = await attachCdp(tabId);
+  if (parsed.clear) {
+    await chrome.debugger.sendCommand(target, "Emulation.clearDeviceMetricsOverride", {}).catch(() => {});
+    await chrome.debugger
+      .sendCommand(target, "Emulation.setTouchEmulationEnabled", { enabled: false })
+      .catch(() => {});
+    await restoreEmulateWindow(tabId);
+    return { ok: true, cleared: true, tabId };
+  }
+  const width = Number(parsed.width);
+  const height = Number(parsed.height);
+  if (!width || !height) throw new Error("emulate needs width and height");
+  const deviceScaleFactor = Number(parsed.deviceScaleFactor) || 1;
+  const mobile = parsed.mobile !== false;
+  let metricsError = null;
+  try {
+    await chrome.debugger.sendCommand(target, "Emulation.setVisibleSize", { width, height });
+  } catch (err) {
+    metricsError = "setVisibleSize: " + String(err && err.message ? err.message : err);
+  }
+  try {
+    await chrome.debugger.sendCommand(target, "Emulation.setDeviceMetricsOverride", {
+      width,
+      height,
+      deviceScaleFactor,
+      mobile,
+      screenWidth: width,
+      screenHeight: height,
+      positionX: 0,
+      positionY: 0,
+      dontSetVisibleSize: false,
+      screenOrientation: { type: "portraitPrimary", angle: 0 },
+    });
+  } catch (err) {
+    metricsError = (metricsError ? metricsError + "; " : "") + String(err && err.message ? err.message : err);
+  }
+  if (parsed.touch !== false) {
+    await chrome.debugger
+      .sendCommand(target, "Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 5 })
+      .catch(() => {});
+  }
+  if (parsed.userAgent || mobile) {
+    await chrome.debugger
+      .sendCommand(target, "Network.setUserAgentOverride", {
+        userAgent: parsed.userAgent || IPHONE_UA,
+      })
+      .catch(() => {});
+  }
+  const shouldReload = spec && spec.reload === false ? false : true;
+  if (shouldReload) {
+    await chrome.tabs.reload(tabId).catch(() => {});
+    await new Promise((resolve, reject) => {
+      const started = Date.now();
+      const timer = setInterval(async () => {
+        const tab = await chrome.tabs.get(tabId).catch(() => null);
+        if (tab && tab.status === "complete") {
+          clearInterval(timer);
+          resolve();
+        } else if (Date.now() - started > 15000) {
+          clearInterval(timer);
+          reject(new Error("emulate reload timeout"));
+        }
+      }, 100);
+    }).catch(() => {});
+    await attachCdp(tabId).catch(() => {});
+  }
+  await sleep(150);
+  const measure = async () => {
+    try {
+      const dim = await chrome.debugger.sendCommand({ tabId }, "Runtime.evaluate", {
+        expression: "({ innerWidth: window.innerWidth, innerHeight: window.innerHeight })",
+        returnByValue: true,
+      });
+      return (dim && dim.result && dim.result.value) || {};
+    } catch {
+      return {};
+    }
+  };
+  let { innerWidth, innerHeight } = await measure();
+  let shell = "cdp";
+  let windowId = null;
+  if (!(innerWidth && Math.abs(innerWidth - width) <= 80)) {
+    await chrome.debugger
+      .sendCommand({ tabId }, "Emulation.clearDeviceMetricsOverride", {})
+      .catch(() => {});
+    const tab = await chrome.tabs.get(tabId).catch(() => null);
+    const originWindowId = tab && tab.windowId;
+    let groupTitle = "";
+    if (tab && tab.groupId >= 0) {
+      const g = await chrome.tabGroups.get(tab.groupId).catch(() => null);
+      groupTitle = (g && g.title) || "";
+    }
+    await chrome.tabs.ungroup(tabId).catch(() => {});
+    const popup = await chrome.windows.create({
+      tabId,
+      type: "popup",
+      focused: false,
+      width: width + 16,
+      height: height + 88,
+    }).catch(() => null);
+    if (popup && popup.id) {
+      windowId = popup.id;
+      shell = "popup";
+      await chrome.windows
+        .update(popup.id, { width: width + 16, height: height + 88, focused: false })
+        .catch(() => {});
+      await attachCdp(tabId).catch(() => {});
+      await sleep(200);
+      const again = await measure();
+      innerWidth = again.innerWidth;
+      innerHeight = again.innerHeight;
+      try {
+        const bounds = await chrome.windows.get(popup.id);
+        const placed = await chrome.tabs.get(tabId);
+        const vis = await chrome.scripting.executeScript({
+          target: { tabId },
+          func: () => ({
+            innerWidth: window.innerWidth,
+            innerHeight: window.innerHeight,
+            outerWidth: window.outerWidth,
+          }),
+        });
+        const v = vis && vis[0] && vis[0].result;
+        if (v && v.innerWidth) {
+          innerWidth = v.innerWidth;
+          innerHeight = v.innerHeight;
+        }
+        metricsError =
+          (metricsError ? metricsError + "; " : "") +
+          `popup ${bounds.width}x${bounds.height} tabWin=${placed.windowId} outer=${v && v.outerWidth}`;
+      } catch (err) {
+        metricsError = (metricsError ? metricsError + "; " : "") + String(err && err.message ? err.message : err);
+      }
+      emulateOrigins.set(tabId, { originWindowId, groupTitle });
+    }
+  }
+  return {
+    ok: true,
+    tabId,
+    width,
+    height,
+    deviceScaleFactor,
+    mobile,
+    touch: parsed.touch !== false,
+    userAgent: Boolean(parsed.userAgent || mobile),
+    reloaded: shouldReload,
+    innerWidth,
+    innerHeight,
+    shell,
+    windowId,
+    metricsError,
+  };
+}
+
+async function restoreEmulateWindow(tabId) {
+  const rec = emulateOrigins.get(tabId);
+  emulateOrigins.delete(tabId);
+  if (!rec || !rec.originWindowId) return;
+  try {
+    await chrome.tabs.move(tabId, { windowId: rec.originWindowId, index: -1 });
+    if (rec.groupTitle) {
+      const groups = await chrome.tabGroups.query({ windowId: rec.originWindowId });
+      const g = groups.find((x) => x.title === rec.groupTitle);
+      if (g) await chrome.tabs.group({ tabIds: [tabId], groupId: g.id });
+    }
+  } catch {
+    // ignore
+  }
 }
 
 chrome.debugger.onEvent.addListener(onEvent);

@@ -113,6 +113,7 @@ document.getElementById("inner").onclick = () => {
 <meta charset="utf-8">
 <title>Kitchen</title>
 <h1>Kitchen</h1>
+<p id="mq">desktop</p>
 <button id="logout">退出登录</button>
 <button id="ok">Continue</button>
 <div id="card" role="button" tabindex="0">Open card</div>
@@ -161,6 +162,32 @@ document.getElementById("row-check").onchange = () => {
 window.addEventListener("message", (e) => {
   if (e.data && e.data.gbc === "sent") status.textContent = "iframe-sent";
 });
+const mq = document.getElementById("mq");
+const syncMq = () => {
+  mq.textContent = window.matchMedia("(max-width: 1023px)").matches ? "phone" : "desktop";
+};
+syncMq();
+window.addEventListener("resize", syncMq);
+</script>`);
+      return;
+    }
+    if (url.pathname === "/heavy") {
+      const n = Math.min(Number(url.searchParams.get("n") || 400), 2000);
+      const buttons = Array.from({ length: n }, (_, i) => `<button class="row">Row ${i}</button>`).join("");
+      res.end(`<!doctype html>
+<meta charset="utf-8">
+<title>Heavy</title>
+<p id="count">${n}</p>
+<div>${buttons}</div>`);
+      return;
+    }
+    if (url.pathname === "/busy") {
+      res.end(`<!doctype html>
+<meta charset="utf-8">
+<title>Busy</title>
+<p id="status">polling</p>
+<script>
+setInterval(() => fetch("/slow?ms=8000").catch(() => {}), 200);
 </script>`);
       return;
     }

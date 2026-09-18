@@ -17,6 +17,8 @@ Use MCP tools on server `grok-browser-use` (some installs still expose `grok-bro
 ## Rules
 
 - New tabs go in this session's `Grok Browser · <short-id>` tab group (from `GROK_SESSION_ID`). Do not dump them into the user's existing tabs or another Grok session's group.
+- Phone UX: `emulate({ tabId, viewport: "iphone" })`. Daily Chrome ignores CDP device metrics, so this may open a ~390px popup (`focused: false`) instead of resizing the user's window. `emulate({ tabId, viewport: "reset" })` moves the tab back. Never `window.resizeTo` / drag windows.
+- `snapshot` is capped (~250 interactive nodes). `wait_for` returns `{ timedOut: true }` instead of hanging on chatty pages.
 - A visible comet pointer on agent pages is expected.
 - Default `new_tab` is visible (`show` omitted). Use `show: false` only when the user must not be interrupted.
 - Never drag, resize, or steal OS-window focus.

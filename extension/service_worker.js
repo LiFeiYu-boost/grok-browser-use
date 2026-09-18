@@ -14,6 +14,8 @@ import {
   cssForUid,
   cdpClick,
   cdpHover,
+  emulateDevice,
+  isEmulatedTab,
 } from "./cdp-collector.js";
 import {
   GROUP_PREFIX,
@@ -43,6 +45,7 @@ const OWNED_TAB_METHODS = new Set([
   "tabs.wait",
   "tabs.performance",
   "tabs.css",
+  "tabs.emulate",
   "diagnostics.console",
   "diagnostics.network",
   "diagnostics.consoleGet",
@@ -200,6 +203,8 @@ async function dispatch(method, params) {
       return await performanceSummary(params.tabId);
     case "tabs.css":
       return await cssForUid(params.tabId, params.uid);
+    case "tabs.emulate":
+      return await emulateDevice(params.tabId, params);
     default:
       throw new Error(`unknown method: ${method}`);
   }
@@ -240,6 +245,7 @@ async function tabGroupTitle(tabId) {
 }
 
 async function assertOwnedTab(tabId, sessionId) {
+  if (isEmulatedTab(tabId)) return;
   const title = await tabGroupTitle(tabId);
   if (!isGrokGroupTitle(title)) {
     throw new Error(`tab ${tabId} is not in a Grok Browser group`);
@@ -374,8 +380,9 @@ function waitComplete(tabId, timeoutMs = 15000) {
 function snapshotInFrame() {
   const DESTRUCTIVE =
     /(log\s*out|sign\s*out|signout|退出登录|注销|delete account|删除账号|删除账户|断开连接|解除连接|解除绑定|\bdisconnect\b)/i;
+  const MAX_NODES = 250;
   const sel =
-    'a, button, input, textarea, select, option, summary, label, [role], [onclick], [tabindex]:not([tabindex="-1"]), [contenteditable="true"]';
+    'a, button, input, textarea, select, option, summary, label, [onclick], [contenteditable="true"], [tabindex]:not([tabindex="-1"]), [role="button"], [role="link"], [role="checkbox"], [role="radio"], [role="textbox"], [role="combobox"], [role="tab"], [role="menuitem"], [role="option"], [role="switch"], [role="searchbox"], [role="slider"]';
   const implicitRole = (el) => {
     const role = el.getAttribute("role");
     if (role) return role;
@@ -511,7 +518,11 @@ function snapshotInFrame() {
       w: Math.round(r.width),
       h: Math.round(r.height),
     });
+    if (nodes.length >= MAX_NODES * 2) break;
   }
+  nodes.sort((a, b) => Number(b.inViewport) - Number(a.inViewport));
+  const truncated = nodes.length > MAX_NODES;
+  if (truncated) nodes.length = MAX_NODES;
   let crossOrigin = false;
   try {
     void window.top.document;
@@ -526,26 +537,41 @@ function snapshotInFrame() {
       : ""
     ).slice(0, 800),
     crossOrigin,
+    truncated,
+    nodeCount: nodes.length,
     nodes,
   };
 }
 
 async function snapshot(tabId) {
-  const injections = await chrome.scripting.executeScript({
-    target: { tabId, allFrames: true },
-    func: snapshotInFrame,
-  });
+  const injections = await Promise.race([
+    chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      func: snapshotInFrame,
+    }),
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error("snapshot script timeout")), 8000)
+    ),
+  ]);
   const frames = [];
   const nodes = [];
   let title = "";
   let url = "";
   let excerpt = "";
+  let truncated = false;
+  const frameBudget = 6;
+  let frameUsed = 0;
   for (const inj of injections || []) {
     const res = inj.result;
     if (!res) {
       frames.push({ frameId: inj.frameId, crossOrigin: true });
       continue;
     }
+    if (frameUsed >= frameBudget && inj.frameId) {
+      truncated = true;
+      continue;
+    }
+    frameUsed += 1;
     const prefix = `f${inj.frameId}-`;
     const pairs = (res.nodes || []).map((n) => [n.uid, prefix + n.uid]);
     if (pairs.length) {
@@ -568,7 +594,9 @@ async function snapshot(tabId) {
       href: res.href,
       crossOrigin: Boolean(res.crossOrigin),
       nodeCount: (res.nodes || []).length,
+      truncated: Boolean(res.truncated),
     });
+    if (res.truncated) truncated = true;
     for (const n of res.nodes || []) {
       nodes.push({ ...n, uid: prefix + n.uid, frameId: inj.frameId });
     }
@@ -580,6 +608,8 @@ async function snapshot(tabId) {
     bodyText: excerpt,
     frames,
     nodes,
+    truncated,
+    nodeCount: nodes.length,
   };
   lastSnap.set(tabId, out);
   return out;
@@ -982,7 +1012,7 @@ async function press(tabId, key) {
 
 async function waitFor(params) {
   const tabId = params.tabId;
-  const timeoutMs = Number(params.timeoutMs) || 15000;
+  const timeoutMs = Number(params.timeoutMs) || 8000;
   if (params.networkIdle) {
     return await waitNetworkIdle(tabId, {
       idleMs: Number(params.idleMs) || 500,
