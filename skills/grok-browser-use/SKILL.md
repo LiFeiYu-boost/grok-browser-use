@@ -30,7 +30,7 @@ Use MCP tools on server `grok-browser-use` (some installs still expose `grok-bro
 
 ## Flow
 
-1. `status` — confirm `connected` (or `connectionState`), `mode=daily`, and `tabGroup` for this session. Daily Chrome uses one shared broker; each session has its own tab group. `list_tabs` defaults to this group (`scope: "all"` to see other Grok groups, never the user's own tabs). If disconnected, retry; do not skip acceptance.
+1. `status` — confirm `connected` (or `connectionState`), `mode=daily`, and `tabGroup` for this session. Daily Chrome uses one shared broker; each session has its own tab group. `list_tabs` defaults to this group (`scope: "all"` to see other Grok groups, never the user's own tabs). If disconnected, retry `status`/`new_tab` (0.6.10 reconnects to `daily.sock`); do not skip acceptance. `emulate` is a grok-browser-control tool (`grok-browser-control__emulate`); if `search_tool` only shows chrome-devtools emulate, the MCP handshake is stale — new session, not chrome-devtools.
 2. `new_tab` with the target URL (CDP is attached before navigate; network idle is waited by default).
 3. `snapshot` to get uids (role / name / destructive / iframe frames).
 4. `click` / `fill` / `hover` / `scroll` / `select_option` / `press` / `evaluate`.

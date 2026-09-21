@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "grok-browser-use",
-  "version": "0.6.9",
+  "version": "0.6.10",
   "description": "Lets Grok operate Chrome tabs in a dedicated tab group with a visible pointer.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAlINzvIq29Kc8WwWbyWKv4Nx6nW6igkuypDQOKT3r8h1JbpjSG1VvR+SWc7MGd2rwbyfwp8cutEwq1ePrbcfIwb5Mn8C0vS5y0EfXI6aWT2+ek18g9r05inbLqlrn0b5JjQZhSqZ4Qr/bHxZIEBNEX6vUOpXI8L3RwNY/9uTZTuxyllSU7eWYbUyGs6VyDkh45c06w+2QciGTmXsGnFMTyFpgnlzpSa6SRC5RoM7pLtOGK7FkN0xJVy8W7YsI9Abd5UbMMSC5UBAvfmVLTTcoJqvbZTkkpbf3McfIJgmcdXDPUEGyVG83fSpwcQEJ17oZJX2hyH3WQDOEO6qJUr4j4QIDAQAB",
   "background": {

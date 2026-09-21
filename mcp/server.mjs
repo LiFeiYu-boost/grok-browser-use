@@ -402,18 +402,29 @@ class BrowserControlServer {
     return this.broker.request(method, withSession(params), timeoutMs);
   }
 
+  async attachDailyBroker() {
+    const isolated = Boolean(process.env.GROK_BROWSER_DAILY_SOCKET);
+    this.broker = await ensureDailyBroker({
+      installHost: !isolated,
+      nudgeNativeHost: !isolated,
+    });
+    this.sharedDaily = true;
+    this.mode = "daily";
+  }
+
   async ensureConnected(timeoutMs) {
     if (this.brokerConnected()) return;
     const waitMs = timeoutMs || (this.mode === "daily" ? 45000 : 15000);
-    if (this.mode === "daily" && this.sharedDaily) {
+    if (this.mode !== "headless") {
       const sock = this.broker && this.broker.sock;
       if (!this.broker || !sock || sock.destroyed) {
-        const isolated = Boolean(process.env.GROK_BROWSER_DAILY_SOCKET);
-        this.broker = await ensureDailyBroker({
-          installHost: !isolated,
-          nudgeNativeHost: !isolated,
-        });
+        await this.attachDailyBroker();
       }
+    }
+    if (!this.broker || typeof this.broker.waitReady !== "function") {
+      throw new Error(
+        "grok-browser-use is not connected. Open Google Chrome with the unpacked grok-browser-use extension loaded."
+      );
     }
     try {
       await this.broker.waitReady(waitMs);
@@ -455,12 +466,7 @@ class BrowserControlServer {
     const target = process.env.GROK_BROWSER_TARGET || "daily";
     this.mode = target === "cft" ? "headless" : "daily";
     if (this.mode === "daily") {
-      const isolated = Boolean(process.env.GROK_BROWSER_DAILY_SOCKET);
-      this.broker = await ensureDailyBroker({
-        installHost: !isolated,
-        nudgeNativeHost: !isolated,
-      });
-      this.sharedDaily = true;
+      await this.attachDailyBroker();
     } else {
       const cftSock = path.join(RUN_DIR, `cft-${process.pid}.sock`);
       this.broker = new Broker({ socketPath: cftSock });
@@ -546,7 +552,16 @@ class BrowserControlServer {
     if (args.show === true && this.broker) {
       this.broker.recordAudit("show", { tool: name, args });
     }
-    if (name === "status") return this.statusPayload();
+    if (name === "status") {
+      if (!this.brokerConnected()) {
+        try {
+          await this.ensureConnected(5000);
+        } catch {
+          // still disconnected; payload reports that
+        }
+      }
+      return this.statusPayload();
+    }
     const run = async () => {
       await this.ensureConnected();
       return await this.dispatchTool(name, args);
@@ -764,6 +779,8 @@ async function main() {
     if (!starting) {
       starting = server.startBrowser().catch((err) => {
         process.stderr.write(`browser start failed: ${err}\n`);
+        starting = null;
+        throw err;
       });
     }
     return starting;
@@ -779,14 +796,15 @@ async function main() {
           id,
           result: {
             protocolVersion: (params && params.protocolVersion) || "2024-11-05",
-            capabilities: { tools: {} },
-            serverInfo: { name: "grok-browser-use", version: "0.6.9" },
+            capabilities: { tools: { listChanged: true } },
+            serverInfo: { name: "grok-browser-use", version: "0.6.10" },
           },
         });
         return;
       }
       if (method === "notifications/initialized") {
-        ensureBrowser();
+        ensureBrowser().catch(() => {});
+        write({ jsonrpc: "2.0", method: "notifications/tools/list_changed" });
         return;
       }
       if (method === "tools/list") {
