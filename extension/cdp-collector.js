@@ -576,7 +576,6 @@ export function parseViewport(spec) {
 
 export async function emulateDevice(tabId, spec) {
   const parsed = parseViewport(spec && spec.viewport != null ? spec.viewport : spec);
-  await chrome.tabs.update(tabId, { active: true }).catch(() => {});
   const target = await attachCdp(tabId);
   if (parsed.clear) {
     await chrome.debugger.sendCommand(target, "Emulation.clearDeviceMetricsOverride", {}).catch(() => {});

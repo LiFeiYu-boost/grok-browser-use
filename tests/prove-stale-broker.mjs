@@ -15,7 +15,7 @@ async function main() {
   const socketPath = path.join(dir, "daily.sock");
   const prev = process.env.GROK_BROWSER_DAILY_SOCKET;
   process.env.GROK_BROWSER_DAILY_SOCKET = socketPath;
-  let hub;
+  let hubPid;
   let recovered;
   let mcp;
   try {
@@ -31,6 +31,7 @@ async function main() {
       nudgeNativeHost: false,
     });
     assert.ok(client.hubPid);
+    hubPid = client.hubPid;
     client.close();
 
     mcp = startMcpServer({
@@ -40,9 +41,9 @@ async function main() {
     const init = await mcp.request("initialize", {
       protocolVersion: "2024-11-05",
       capabilities: {},
-      clientInfo: { name: "prove-stale", version: "0.6.10" },
+      clientInfo: { name: "prove-stale", version: "0.6.11" },
     });
-    assert.equal(init.serverInfo.version, "0.6.10");
+    assert.equal(init.serverInfo.version, "0.6.11");
     const listed = await mcp.request("tools/list", {});
     assert.ok((listed.tools || []).some((t) => t.name === "emulate"));
     mcp.notify("notifications/initialized");
@@ -75,7 +76,7 @@ async function main() {
       // ignore
     }
     try {
-      hub?.close();
+      if (hubPid) process.kill(hubPid, "SIGTERM");
     } catch {
       // ignore
     }

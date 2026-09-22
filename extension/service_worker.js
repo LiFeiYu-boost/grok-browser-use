@@ -15,18 +15,14 @@ import {
   cdpClick,
   cdpHover,
   emulateDevice,
-  isEmulatedTab,
 } from "./cdp-collector.js";
+import { TabOwnership } from "./tab-ownership.js";
 import {
-  GROUP_PREFIX,
-  isGrokGroupTitle,
   sessionGroupColor,
   sessionGroupTitle,
 } from "./session-id.js";
 
 const HOST_NAME = "com.xai.grok.browser";
-const GROUP_TITLE = GROUP_PREFIX;
-const GROUP_COLOR = "cyan";
 const OWNED_TAB_METHODS = new Set([
   "tabs.close",
   "tabs.snapshot",
@@ -53,6 +49,7 @@ const OWNED_TAB_METHODS = new Set([
 ]);
 const FORBIDDEN = [];
 const grokTabIds = new Set();
+const tabOwnership = new TabOwnership(chrome);
 const lastSnap = new Map();
 const consoleBuf = [];
 const networkBuf = [];
@@ -211,52 +208,11 @@ async function dispatch(method, params) {
 }
 
 async function listTabs(params = {}) {
-  const tabs = await chrome.tabs.query({});
-  const groups = await chrome.tabGroups.query({});
-  const gmap = Object.fromEntries(groups.map((g) => [g.id, g]));
-  const sessionId = params.sessionId;
-  const ownTitle = sessionId ? sessionGroupTitle(sessionId) : null;
-  const scope = params.scope === "all" || !sessionId ? "all" : "session";
-  const rows = [];
-  for (const t of tabs) {
-    const title =
-      t.groupId >= 0 && gmap[t.groupId] ? gmap[t.groupId].title || "" : null;
-    if (!isGrokGroupTitle(title)) continue;
-    if (scope === "session" && title !== ownTitle) continue;
-    rows.push({
-      tabId: t.id,
-      windowId: t.windowId,
-      url: t.url || "",
-      title: t.title || "",
-      active: Boolean(t.active),
-      groupId: t.groupId,
-      tabGroup: title,
-      sessionId: sessionId && title === ownTitle ? sessionId : undefined,
-    });
-  }
-  return rows;
-}
-
-async function tabGroupTitle(tabId) {
-  const tab = await chrome.tabs.get(tabId).catch(() => null);
-  if (!tab || tab.groupId < 0) return "";
-  const group = await chrome.tabGroups.get(tab.groupId).catch(() => null);
-  return (group && group.title) || "";
+  return tabOwnership.list(params);
 }
 
 async function assertOwnedTab(tabId, sessionId) {
-  if (isEmulatedTab(tabId)) return;
-  const title = await tabGroupTitle(tabId);
-  if (!isGrokGroupTitle(title)) {
-    throw new Error(`tab ${tabId} is not in a Grok Browser group`);
-  }
-  if (!sessionId) return;
-  const expected = sessionGroupTitle(sessionId);
-  if (title !== expected) {
-    throw new Error(
-      `tab ${tabId} belongs to "${title}", not this session's "${expected}"`
-    );
-  }
+  return tabOwnership.assert(tabId, sessionId);
 }
 
 async function findSessionGroup(windowId, sessionId) {
@@ -328,32 +284,41 @@ async function createTab(params) {
     url: "about:blank",
     active,
   });
-  grokTabIds.add(tab.id);
-  const grouped = await addToSessionGroup(tab, params.sessionId);
-  const groupId = grouped.groupId;
-  const dest = String(params.url || "");
-  const skipDebugger = cdpDeniedUrl(dest);
-  if (!skipDebugger) await attachCdp(tab.id).catch(() => {});
-  await chrome.tabs.update(tab.id, { url: params.url });
-  if (!skipDebugger) await waitComplete(tab.id);
-  const loadedUrl = (await chrome.tabs.get(tab.id).catch(() => tab)).url || dest;
-  if (cdpDeniedUrl(loadedUrl)) detachCdp(tab.id);
-  if (params.wait !== false && !cdpDeniedUrl(loadedUrl)) {
-    await waitNetworkIdle(tab.id, {
-      idleMs: Number(params.idleMs) || 300,
-      timeoutMs: Number(params.timeoutMs) || 2500,
-    }).catch(() => {});
+  try {
+    await tabOwnership.claim(tab.id, params.sessionId);
+    grokTabIds.add(tab.id);
+    const grouped = await addToSessionGroup(tab, params.sessionId);
+    const groupId = grouped.groupId;
+    const dest = String(params.url || "");
+    const skipDebugger = cdpDeniedUrl(dest);
+    if (!skipDebugger) await attachCdp(tab.id).catch(() => {});
+    await chrome.tabs.update(tab.id, { url: params.url });
+    if (!skipDebugger) await waitComplete(tab.id);
+    const loadedUrl = (await chrome.tabs.get(tab.id).catch(() => tab)).url || dest;
+    if (cdpDeniedUrl(loadedUrl)) detachCdp(tab.id);
+    if (params.wait !== false && !cdpDeniedUrl(loadedUrl)) {
+      await waitNetworkIdle(tab.id, {
+        idleMs: Number(params.idleMs) || 300,
+        timeoutMs: Number(params.timeoutMs) || 2500,
+      }).catch(() => {});
+    }
+    await ensurePointer(tab.id);
+    const loaded = await chrome.tabs.get(tab.id).catch(() => tab);
+    return {
+      tabId: tab.id,
+      url: loaded.url || params.url,
+      title: loaded.title || "",
+      groupId,
+      tabGroup: grouped.tabGroup,
+      sessionId: params.sessionId || "local",
+    };
+  } catch (err) {
+    // The caller never received a usable tab ID. Clean up only this new tab.
+    await chrome.tabs.remove(tab.id).catch(() => {});
+    await tabOwnership.forget(tab.id).catch(() => {});
+    grokTabIds.delete(tab.id);
+    throw err;
   }
-  await ensurePointer(tab.id);
-  const loaded = await chrome.tabs.get(tab.id).catch(() => tab);
-  return {
-    tabId: tab.id,
-    url: loaded.url || params.url,
-    title: loaded.title || "",
-    groupId,
-    tabGroup: grouped.tabGroup,
-    sessionId: params.sessionId || "local",
-  };
 }
 
 function waitComplete(tabId, timeoutMs = 15000) {
@@ -709,15 +674,9 @@ async function maybeWait(tabId, params) {
 }
 
 async function refreshGrokTabs() {
+  const tabs = await tabOwnership.list({ scope: "all" });
   grokTabIds.clear();
-  const groups = await chrome.tabGroups.query({});
-  for (const grok of groups) {
-    if (!isGrokGroupTitle(grok.title)) continue;
-    const tabs = await chrome.tabs.query({ groupId: grok.id });
-    for (const tab of tabs) {
-      if (tab.id) grokTabIds.add(tab.id);
-    }
-  }
+  for (const tab of tabs) grokTabIds.add(tab.tabId);
 }
 
 function readConsole(params = {}) {
@@ -820,8 +779,8 @@ async function click(tabId, uid, params = {}) {
         el.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
         el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
         el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
-        el.dispatchEvent(new MouseEvent("click", { bubbles: true }));
         if (typeof el.click === "function") el.click();
+        else el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
         return { ok: true, tag: el.tagName.toLowerCase() };
       },
       args: [uid],
@@ -845,8 +804,8 @@ async function domClick(tabId, uid, params = {}) {
       el.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
       el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
       el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
-      el.dispatchEvent(new MouseEvent("click", { bubbles: true }));
       if (typeof el.click === "function") el.click();
+      else el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
       return { ok: true, tag: el.tagName.toLowerCase() };
     },
     args: [uid],
@@ -1154,6 +1113,7 @@ async function screenshot(tabId, params = {}) {
 }
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+  tabOwnership.forget(tabId).catch(() => {});
   grokTabIds.delete(tabId);
   lastSnap.delete(tabId);
   try {

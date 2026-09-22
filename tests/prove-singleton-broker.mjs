@@ -110,8 +110,8 @@ async function proveDaemonAndMcp() {
     };
     const i1 = await mcp1.request("initialize", init);
     const i2 = await mcp2.request("initialize", init);
-    assert.equal(i1.serverInfo.version, "0.6.10");
-    assert.equal(i2.serverInfo.version, "0.6.10");
+    assert.equal(i1.serverInfo.version, "0.6.11");
+    assert.equal(i2.serverInfo.version, "0.6.11");
     mcp1.notify("notifications/initialized");
     mcp2.notify("notifications/initialized");
     await sleep(400);

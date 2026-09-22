@@ -87,6 +87,7 @@ Collection is limited to the **Grok Browser** group. Your other tabs are left al
 ## Tests
 
 ```bash
+node --test tests/test-*.mjs            # isolated regressions; does not touch daily Chrome
 node tests/test-framing.mjs
 node tests/prove-singleton-broker.mjs   # shared daily hub; does not touch Chrome
 node tests/prove-session-groups.mjs     # per-session tab groups; does not touch Chrome
@@ -96,7 +97,14 @@ node tests/spike-native-messaging.mjs   # Chrome for Testing; does not touch dai
 node tests/acceptance.mjs
 ```
 
-`tests/prove-*.mjs` need the unpacked extension already loaded. They will operate the Grok group in your daily Chrome.
+`prove-singleton-broker`, `prove-session-groups`, `prove-stale-broker` and
+`prove-daily-socket` do not operate Chrome. `prove-hands` and
+`prove-tab-recovery` launch isolated Chrome for Testing; the latter also needs
+`playwright-core` (`PLAYWRIGHT_MODULE` may point to its `index.mjs`). Other live
+proofs such as `prove-viewport-snapshot` operate the Grok group in daily Chrome.
+
+See the [0.6.11 issue verification](tests/issue-audit-2026-09-22.md) for coverage,
+ownership lifecycle and release limitations.
 
 ## Layout
 

@@ -45,7 +45,7 @@ async function main() {
     const statusText = typeof afterVal === "string" ? afterVal : afterVal.status;
     const checked = typeof afterVal === "object" && afterVal && afterVal.checked;
     assert.ok(
-      checked || /checked/.test(String(statusText)),
+      checked === true && statusText === "checked",
       JSON.stringify({ check, clicked, after })
     );
 

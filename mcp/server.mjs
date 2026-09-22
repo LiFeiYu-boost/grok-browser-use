@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { Broker } from "../lib/broker.mjs";
-import { launchCft, killCftTree, killLaunchedCft, writeCftHostWrapper } from "../lib/launch-cft.mjs";
+import { launchCft, killCftTree, writeCftHostWrapper } from "../lib/launch-cft.mjs";
 import { restoreDailyNativeHost } from "../lib/install-host-manifest.mjs";
 import { McpStdio } from "../lib/native-framing.mjs";
 import { ensureDailyBroker } from "../lib/broker-client.mjs";
@@ -372,7 +373,7 @@ const TOOLS = [
 
 const FORBIDDEN_KEYS = ["bringToFront", "resize_page", "drag"];
 
-class BrowserControlServer {
+export class BrowserControlServer {
   constructor() {
     this.broker = null;
     this.launched = null;
@@ -380,6 +381,8 @@ class BrowserControlServer {
     this.started = null;
     this.pausedDailyHost = null;
     this.sharedDaily = false;
+    this.attaching = null;
+    this.connectionError = null;
   }
 
   brokerConnected() {
@@ -403,13 +406,25 @@ class BrowserControlServer {
   }
 
   async attachDailyBroker() {
+    if (this.attaching) return this.attaching;
     const isolated = Boolean(process.env.GROK_BROWSER_DAILY_SOCKET);
-    this.broker = await ensureDailyBroker({
-      installHost: !isolated,
-      nudgeNativeHost: !isolated,
-    });
-    this.sharedDaily = true;
-    this.mode = "daily";
+    this.attaching = (async () => {
+      const next = await ensureDailyBroker({
+        installHost: !isolated,
+        // A not-yet-ready native host is not a stale process. Other sessions
+        // must not repeatedly kill it while it is completing its handshake.
+        nudgeNativeHost: false,
+      });
+      this.broker?.close();
+      this.broker = next;
+      this.sharedDaily = true;
+      this.mode = "daily";
+    })();
+    try {
+      await this.attaching;
+    } finally {
+      this.attaching = null;
+    }
   }
 
   async ensureConnected(timeoutMs) {
@@ -427,7 +442,12 @@ class BrowserControlServer {
       );
     }
     try {
-      await this.broker.waitReady(waitMs);
+      const broker = this.broker;
+      await broker.waitReady(waitMs);
+      if (broker !== this.broker || !this.brokerConnected()) {
+        throw new Error("broker socket closed while connecting");
+      }
+      this.connectionError = null;
     } catch (err) {
       throw new Error(
         "grok-browser-use is not connected. Open Google Chrome with the unpacked grok-browser-use extension loaded. " +
@@ -453,6 +473,7 @@ class BrowserControlServer {
       pid: this.launched && this.launched.pid,
       hubPid: this.broker && this.broker.hubPid,
       sharedBroker: this.sharedDaily,
+      connectionError: connected ? undefined : this.connectionError || undefined,
       ...this.sessionMeta(),
       started: this.started,
       hint: connected
@@ -488,9 +509,11 @@ class BrowserControlServer {
         sharedBroker: true,
         note: "shared daily broker; MCP stays up if the extension is asleep",
       };
-      this.broker
+      const broker = this.broker;
+      broker
         .waitReady(60000)
         .then((ready) => {
+          if (this.broker !== broker) return;
           this.started = {
             ready,
             pid: this.broker.hubPid || null,
@@ -503,6 +526,8 @@ class BrowserControlServer {
           };
         })
         .catch((err) => {
+          if (this.broker !== broker) return;
+          this.connectionError = String(err && err.message ? err.message : err);
           this.started = {
             ...this.started,
             connecting: false,
@@ -538,11 +563,6 @@ class BrowserControlServer {
       killCftTree(this.launched.pid);
       this.launched = null;
     }
-    try {
-      killLaunchedCft();
-    } catch {
-      // ignore
-    }
   }
 
   async callTool(name, args = {}) {
@@ -556,18 +576,14 @@ class BrowserControlServer {
       if (!this.brokerConnected()) {
         try {
           await this.ensureConnected(5000);
-        } catch {
-          // still disconnected; payload reports that
+        } catch (err) {
+          this.connectionError = String(err && err.message ? err.message : err);
         }
       }
       return this.statusPayload();
     }
-    const run = async () => {
-      await this.ensureConnected();
-      return await this.dispatchTool(name, args);
-    };
     try {
-      return await run();
+      await this.ensureConnected();
     } catch (err) {
       const msg = String(err && err.message ? err.message : err);
       if (
@@ -578,8 +594,11 @@ class BrowserControlServer {
       ) {
         throw err;
       }
-      return await run();
+      await this.ensureConnected();
     }
+    // Once dispatched, a dropped response does not prove the action failed.
+    // Replaying new_tab/click/press/fetch_json can duplicate user actions.
+    return await this.dispatchTool(name, args);
   }
 
   async dispatchTool(name, args = {}) {
@@ -797,7 +816,7 @@ async function main() {
           result: {
             protocolVersion: (params && params.protocolVersion) || "2024-11-05",
             capabilities: { tools: { listChanged: true } },
-            serverInfo: { name: "grok-browser-use", version: "0.6.10" },
+            serverInfo: { name: "grok-browser-use", version: "0.6.11" },
           },
         });
         return;
@@ -866,4 +885,11 @@ async function main() {
   });
 }
 
-main();
+let isEntrypoint = false;
+try {
+  isEntrypoint = Boolean(process.argv[1]) &&
+    fs.realpathSync(process.argv[1]) === fs.realpathSync(fileURLToPath(import.meta.url));
+} catch {
+  // Imported modules and stdin/eval callers need no stdio server.
+}
+if (isEntrypoint) main();
